@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Model and experiment artifacts must stay out of Git.
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+outputs/
+model_cache/
+feature_cache/
+attention_cache/
+semantic_prompt.json
+

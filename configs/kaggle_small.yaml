@@ -1,0 +1,58 @@
+seed: 42
+
+data:
+  input_root: /kaggle/input
+  dataset_slug: pv-gf2
+  categories: ["正样本", "困难正样本", "负样本"]
+  image_dir_name: images
+  label_dir_names: [labels, masks, mask]
+  extensions: [.bmp, .png, .jpg, .jpeg, .tif, .tiff]
+  image_size: 1024
+  max_samples: 300
+  samples_per_category: 100
+  split: [0.70, 0.15, 0.15]
+
+dino:
+  model_id: facebook/dinov3-vitl16-pretrain-sat493m
+  local_path_env: DINOV3_MODEL_PATH
+  expected_hidden_dim: 1024
+  patch_size: 16
+  dtype: float16
+  attention_implementation: sdpa
+
+teacher:
+  model_id: OpenGVLab/InternVL3_5-4B
+  local_path_env: INTERNVL_MODEL_PATH
+  dtype: float16
+  quantization: auto
+  max_dynamic_patches: 6
+  max_new_tokens: 256
+  confidence_threshold: 0.5
+  prompt: |
+    这是高分辨率遥感RGB影像，请判断是否存在太阳能光伏板。如果存在，请给出大致位置、置信度以及视觉依据。
+    请只输出严格JSON，不要输出Markdown。坐标基于缩放后的1024x1024影像，格式如下：
+    {"pv_exist": true, "confidence": 0.95, "bbox": [[x_min, y_min, x_max, y_max]], "reason": "视觉依据"}
+    如果不存在光伏板，bbox必须是空列表。
+
+attention:
+  gaussian_sigma: 48.0
+  feature_size: 64
+
+training:
+  epochs: 3
+  batch_size: 2
+  num_workers: 2
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  dice_weight: 1.0
+  cross_entropy_weight: 1.0
+  adapter_bottleneck: 256
+  decoder_channels: 256
+  threshold: 0.5
+  visualization_samples: 8
+
+runtime:
+  output_dir: /kaggle/working/outputs
+  model_cache_dir: /kaggle/temp/model_cache
+  resume: true
+

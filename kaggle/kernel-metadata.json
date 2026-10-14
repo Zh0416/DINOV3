@@ -1,0 +1,16 @@
+{
+  "id": "zh0416/notebook468d03cea3",
+  "title": "DINOv3 InternVL PV Adapter",
+  "code_file": "notebook468d03cea3.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": ["dinov3", "internvl", "photovoltaic", "segmentation", "remote-sensing"],
+  "dataset_sources": ["zh0416/pv-gf2"],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": []
+}
