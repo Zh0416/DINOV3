@@ -9,7 +9,11 @@
   "enable_tpu": false,
   "enable_internet": true,
   "keywords": ["segmentation"],
-  "dataset_sources": ["zh0416/pv-gf2"],
+  "dataset_sources": [
+    "zh0416/pv-gf2",
+    "zh0416/dinov3-pv-internvl-teacher-cache",
+    "gopaliscrraaazzyyyy/timmvit-large-patch16-dinov3-sat493m"
+  ],
   "kernel_sources": [],
   "competition_sources": [],
   "model_sources": []

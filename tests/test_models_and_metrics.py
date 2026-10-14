@@ -23,12 +23,24 @@ class _Backbone(nn.Module):
         return _Output(torch.arange(batch * 5 * 8, dtype=pixel_values.dtype).reshape(batch, 5, 8))
 
 
+class _TimmBackbone(_Backbone):
+    def forward_features(self, images):
+        return super().forward(images).last_hidden_state
+
+
 class ModelAndMetricTests(unittest.TestCase):
     def test_frozen_dino_patch_reshape(self):
         model = FrozenDINOv3(_Backbone(), [0, 0, 0], [1, 1, 1], 32, 16, 8)
         result = model(torch.zeros(2, 3, 32, 32))
         self.assertEqual(tuple(result.shape), (2, 8, 2, 2))
         self.assertTrue(all(not parameter.requires_grad for parameter in model.parameters()))
+
+    def test_timm_dino_patch_reshape(self):
+        model = FrozenDINOv3(
+            _TimmBackbone(), [0, 0, 0], [1, 1, 1], 32, 16, 8, backend="timm"
+        )
+        result = model(torch.zeros(2, 3, 32, 32))
+        self.assertEqual(tuple(result.shape), (2, 8, 2, 2))
 
     def test_adapter_and_decoder_shapes(self):
         model = CachedFeatureSegmenter(16, 32, 8, use_adapter=True)

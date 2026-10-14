@@ -15,6 +15,7 @@ data:
 dino:
   model_id: facebook/dinov3-vitl16-pretrain-sat493m
   local_path_env: DINOV3_MODEL_PATH
+  timm_architecture: vit_large_patch16_dinov3
   expected_hidden_dim: 1024
   patch_size: 16
   dtype: float16

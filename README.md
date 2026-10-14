@@ -19,9 +19,11 @@ available), split 70/15/15 with seed 42. The dataset is expected to contain
 
 Model weights are never committed to this repository and are not downloaded by
 the local test suite. On Kaggle, Hugging Face caches are directed to the
-ephemeral `/kaggle/temp/model_cache` directory. Set the Kaggle secret `HF_TOKEN` if the official
-DINOv3 checkpoint requires gated access. A pre-mounted Kaggle Model can instead
-be supplied through `DINOV3_MODEL_PATH` or `INTERNVL_MODEL_PATH`.
+ephemeral `/kaggle/temp/model_cache` directory. The supplied Kaggle notebook
+mounts a safetensors/timm mirror of the ViT-L/16 SAT checkpoint and exposes it
+through `DINOV3_MODEL_PATH`; this avoids persisting weights locally. For other
+environments, set the Kaggle secret `HF_TOKEN` for the official gated checkpoint
+or point `DINOV3_MODEL_PATH`/`INTERNVL_MODEL_PATH` at a mounted cloud path.
 
 Default checkpoints:
 

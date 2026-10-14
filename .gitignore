@@ -6,6 +6,8 @@ __pycache__/
 venv/
 .idea/
 .vscode/
+.kaggle-*/
+/dataset-metadata.json
 
 # Model and experiment artifacts must stay out of Git.
 *.ckpt
