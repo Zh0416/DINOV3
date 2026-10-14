@@ -60,7 +60,12 @@ def _save_random_visualization(samples, destination: Path, seed: int) -> None:
         overlay = image.copy()
         overlay[mask] = (0.45 * overlay[mask] + 0.55 * np.array([255, 0, 0])).astype(np.uint8)
         axes[row, 0].imshow(image)
-        axes[row, 0].set_title(f"RGB | {sample.category}")
+        category = {
+            "正样本": "Positive",
+            "困难正样本": "Hard positive",
+            "负样本": "Negative",
+        }.get(sample.category, sample.category)
+        axes[row, 0].set_title(f"RGB | {category}")
         axes[row, 1].imshow(mask, cmap="gray", vmin=0, vmax=1)
         axes[row, 1].set_title("Mask")
         axes[row, 2].imshow(overlay)

@@ -234,7 +234,12 @@ def _save_prediction_visualizations(model, loader, device, destination, maximum)
                 axis.imshow(value, cmap="gray" if value.ndim == 2 else None)
                 axis.set_title(title)
                 axis.axis("off")
-            figure.suptitle(str(batch["category"][index]))
+            category = {
+                "正样本": "Positive",
+                "困难正样本": "Hard positive",
+                "负样本": "Negative",
+            }.get(str(batch["category"][index]), str(batch["category"][index]))
+            figure.suptitle(category)
             figure.tight_layout()
             figure.savefig(destination / f"{batch['sample_id'][index]}.png", dpi=140, bbox_inches="tight")
             plt.close(figure)

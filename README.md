@@ -57,6 +57,9 @@ pixel false-negative rate, hard-positive image miss rate, and negative image
 false-alarm rate. The comparison script does not assume that the adapter wins;
 it reports the measured deltas.
 
+The completed 300-image pilot and its hard-positive trade-off are documented in
+[EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md).
+
 ## Tests
 
 The local test suite uses synthetic tensors and temporary images only:
