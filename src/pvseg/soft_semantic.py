@@ -125,7 +125,11 @@ def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: 
         core = strict_positive.copy()
     boundary = (np.zeros_like(strict_positive) if boundary_iterations <= 0 else
                 binary_dilation(strict_positive, iterations=1) & ~binary_erosion(strict_positive, iterations=1))
-    explicit_background = (attention <= negative_probability) & bg_seed & dino_bg & ~binary_dilation(strict_positive, iterations=1)
+    # Attention has a nonzero base level by design, so background is measured
+    # relative to that floor rather than compared with an unreachable raw zero.
+    base = float(settings.get("base_attention", 0.2))
+    background_limit = max(base + 0.03, negative_probability)
+    explicit_background = (attention <= background_limit) & bg_seed & dino_bg & ~binary_dilation(strict_positive, iterations=1)
     target = np.full((size, size), IGNORE, np.uint8)
     target[explicit_background] = 0
     target[core] = 1
