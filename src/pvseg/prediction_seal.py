@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from pvseg.label_free_data import load_rgb_manifest
-from pvseg.label_free_training import VARIANTS
+from pvseg.label_free_training import variants_for_config
 from pvseg.utils import atomic_write_json, read_json
 
 
@@ -27,7 +27,8 @@ def seal_predictions(config, root):
     train_ids = {s.sample_id for s in samples if s.split == "train"}
     if not test_ids or test_ids & train_ids:
         raise RuntimeError("Train/test image content hashes must be distinct")
-    expected = {f"{name}_seed{seed}" for name in VARIANTS for seed in config["ablation"]["seeds"]}
+    variants = variants_for_config(config)
+    expected = {f"{name}_seed{seed}" for name in variants for seed in config["ablation"]["seeds"]}
     training = read_json(root / "reports" / "label_free_training.json")
     if {f"{r['variant']}_seed{r['seed']}" for r in training["runs"]} != expected:
         raise RuntimeError("Missing preregistered experiment runs")
@@ -39,6 +40,9 @@ def seal_predictions(config, root):
     paths = [root / name for name in ("rgb_manifest.json", "protocol_config.json", "semantic_prompt.json",
                                        "rgb_dino_prototypes.npy", "reports/label_free_training.json",
                                        "reports/pseudo_reliability.json", "reports/prototype_provenance.json")]
+    teacher_report = root / "reports/multiview_teacher_report.json"
+    if teacher_report.is_file():
+        paths.append(teacher_report)
     for name in ("predictions", "checkpoints", "pseudo_cache"):
         paths.extend(p for p in (root / name).rglob("*") if p.is_file())
     repo = Path(__file__).resolve().parents[2]
@@ -49,6 +53,7 @@ def seal_predictions(config, root):
     payload = {"created_utc": datetime.now(timezone.utc).isoformat(), "code_commit": commit,
                "manual_annotations_opened_before_seal": 0,
                "threshold": config["training"]["threshold"], "checkpoint_rule": "fixed last epoch",
+               "variants": list(variants),
                "config_sha256": file_hash(root / "protocol_config.json"),
                "test_images": len(test_ids), "runs": sorted(expected),
                "files": {p.relative_to(root).as_posix(): file_hash(p) for p in sorted(paths)}}

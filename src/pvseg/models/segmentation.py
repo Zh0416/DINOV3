@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .adapter import PVAwareAdapter, LegacyPVAwareAdapter
+from .adapter import PVAwareAdapter, LegacyPVAwareAdapter, SoftSemanticPVAwareAdapter
 from .decoder import SegmentationDecoder
 
 
@@ -19,7 +19,8 @@ class CachedFeatureSegmenter(nn.Module):
         super().__init__()
         self.use_adapter = use_adapter
         self.adapter = (
-            (LegacyPVAwareAdapter if adapter_mode == "legacy" else PVAwareAdapter)(
+            (LegacyPVAwareAdapter if adapter_mode == "legacy" else
+             SoftSemanticPVAwareAdapter if adapter_mode == "soft_film" else PVAwareAdapter)(
                 feature_channels, adapter_bottleneck
             ) if use_adapter else None
         )

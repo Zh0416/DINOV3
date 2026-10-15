@@ -47,3 +47,35 @@ class PVAwareAdapter(LegacyPVAwareAdapter):
         update = self.mlp(self.input_projection(features))
         return features + .2 * self.residual_scale.tanh() * gate * update
 
+
+class SoftSemanticPVAwareAdapter(nn.Module):
+    """Zero-initialized residual adapter for non-blocking semantic priors."""
+
+    def __init__(self, channels: int = 1024, bottleneck: int = 256):
+        super().__init__()
+        groups = next((candidate for candidate in (16, 8, 4, 2, 1) if bottleneck % candidate == 0), 1)
+        self.attention_encoder = nn.Sequential(
+            nn.Conv2d(1, bottleneck, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, bottleneck),
+            nn.GELU(),
+            nn.Conv2d(bottleneck, bottleneck, kernel_size=1),
+        )
+        self.feature_projection = nn.Sequential(
+            nn.Conv2d(channels, bottleneck, kernel_size=1),
+            nn.GroupNorm(groups, bottleneck),
+        )
+        self.output_projection = nn.Conv2d(bottleneck, channels, kernel_size=1)
+        # gamma=0 gives exact DINO identity while leaving a gradient for gamma.
+        self.gamma = nn.Parameter(torch.zeros(()))
+
+    def forward(self, features: torch.Tensor, attention: torch.Tensor) -> torch.Tensor:
+        if attention.ndim == 3:
+            attention = attention.unsqueeze(1)
+        if attention.shape[-2:] != features.shape[-2:]:
+            raise ValueError("Attention and feature spatial sizes must match")
+        context = 0.1 * torch.tanh(self.attention_encoder(attention.to(features.dtype)))
+        reduced = self.feature_projection(features)
+        fused = reduced * (1.0 + context)
+        update = self.output_projection(fused)
+        return features + self.gamma.tanh() * update
+

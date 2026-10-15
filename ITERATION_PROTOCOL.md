@@ -104,3 +104,25 @@ Audit pseudo precision/coverage, background contamination and teacher false
 acceptance/rejection after sealing. Save fixed-order GT/prediction visualizations.
 Weights/features/checkpoints stay in Kaggle. Do not retune and call the same
 holdout untouched.
+
+## Soft-semantic v2 protocol
+
+The active redesign is `fresh120_soft_semantic_v2` in
+`configs/kaggle_soft_semantic.yaml`. It explicitly excludes the 120 RGB hashes
+from `fresh120_pseudo_v1` using metadata only, so the new holdout is not the prior
+36-image test. InternVL is queried on the full image, a horizontal flip, and four
+overlapping local crops. Each view emits a 4x4 grid probability/status record;
+coordinates are fused into a nonzero-base soft map rather than a hard bounding box.
+
+Machine targets are three-way: stable positive core=1, stable machine background=0,
+and uncertain/transition/conflicting pixels=255. The retention circuit measures only
+machine pseudo-candidate retention before final annotation access. If it falls below
+50%, the pipeline retains a wider candidate with soft weights and does not invent
+background labels. Human masks remain unavailable until the prediction seal.
+
+Experiment A is a Decoder-only baseline and B is the zero-initialized FiLM Adapter
+with the soft map. They share exactly the same machine targets, optimizer, decoder
+capacity, seeds, fixed epoch count and final checkpoint rule. `semantic_no_adapter`
+and `shuffled_semantic` are preregistered controls. Loss is ignore-aware Dice plus
+Focal; soft weights affect valid machine pixels only. The Adapter never multiplies
+DINO features by attention and starts as an exact identity.

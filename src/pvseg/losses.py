@@ -55,3 +55,39 @@ class PartialPseudoLoss(nn.Module):
         return loss, {"valid_pixels": int(valid.sum()), "dice_loss": float(dice.detach()),
                       "cross_entropy": float(ce.detach())}
 
+
+class IgnoreAwareDiceFocalLoss(nn.Module):
+    """Dice plus focal loss for weighted three-way machine targets."""
+
+    def __init__(self, dice_weight=1.0, focal_weight=1.0, gamma=2.0, alpha=0.25, ignore_index=255):
+        super().__init__()
+        self.dice_weight = float(dice_weight)
+        self.focal_weight = float(focal_weight)
+        self.gamma = float(gamma)
+        self.alpha = float(alpha)
+        self.ignore_index = int(ignore_index)
+
+    def forward(self, logits, target, pixel_weight=None):
+        valid = target != self.ignore_index
+        if not valid.any():
+            zero = logits.sum() * 0.0
+            return zero, {"valid_pixels": 0, "dice_loss": 0.0, "focal_loss": 0.0}
+        safe_target = target.clamp(0, 1).long()
+        weights = torch.ones_like(logits[:, 0]) if pixel_weight is None else pixel_weight.to(logits.device).float()
+        weights = weights * valid
+        per_pixel = F.cross_entropy(logits.float(), safe_target, reduction="none")
+        probabilities = logits.float().softmax(dim=1)
+        pt = probabilities.gather(1, safe_target.unsqueeze(1)).squeeze(1).clamp(1e-6, 1.0 - 1e-6)
+        alpha = torch.where(safe_target == 1, self.alpha, 1.0 - self.alpha)
+        focal = (alpha * (1.0 - pt).pow(self.gamma) * per_pixel * weights).sum() / weights.sum().clamp_min(1.0)
+        foreground = valid & (safe_target == 1)
+        probability = probabilities[:, 1]
+        intersection = (probability * foreground.float() * weights).sum((1, 2))
+        denominator = (probability * valid.float() * weights).sum((1, 2)) + (foreground.float() * weights).sum((1, 2))
+        per_image = 1.0 - (2.0 * intersection + 1.0) / (denominator + 1.0)
+        has_fg = foreground.any((1, 2))
+        dice = per_image[has_fg].mean() if has_fg.any() else logits.sum() * 0.0
+        total = self.dice_weight * dice + self.focal_weight * focal
+        return total, {"valid_pixels": int(valid.sum()), "dice_loss": float(dice.detach()),
+                       "focal_loss": float(focal.detach())}
+

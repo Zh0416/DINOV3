@@ -1,0 +1,82 @@
+seed: 20261016
+protocol:
+  name: fresh120_soft_semantic_v2
+  mode: soft_semantic
+  label_usage: final_evaluation_only
+data:
+  input_root: /kaggle/input
+  dataset_slug: pv-gf2
+  categories: ["正样本", "困难正样本", "负样本"]
+  image_dir_name: images
+  label_dir_names: [labels, masks, mask]
+  extensions: [.bmp, .png, .jpg, .jpeg, .tif, .tiff]
+  image_size: 1024
+  max_samples: 120
+  train_fraction: 0.7
+  rgb_staging_dir: /kaggle/temp/label_free_rgb_soft_v2
+  exclude_cache: dinov3-pv-internvl-teacher-cache
+  exclude_rgb_hash_file: ../configs/fresh120_pseudo_v1_rgb_hashes.json
+dino:
+  model_id: facebook/dinov3-vitl16-pretrain-sat493m
+  local_path_env: DINOV3_MODEL_PATH
+  timm_architecture: vit_large_patch16_dinov3
+  expected_hidden_dim: 1024
+  patch_size: 16
+  dtype: float16
+  attention_implementation: sdpa
+teacher:
+  model_id: OpenGVLab/InternVL3_5-4B
+  local_path_env: INTERNVL_MODEL_PATH
+  dtype: float16
+  quantization: auto
+  schema: grid_v2
+  max_dynamic_patches: 4
+  max_new_tokens: 192
+  local_views: true
+  prompt: |
+    这是高分辨率遥感RGB影像。请判断每个网格区域是否存在太阳能光伏板。
+    只根据可见视觉证据判断，深色屋顶、水面、阴影和温室可能是干扰。
+    只输出一个JSON对象，不要输出Markdown。JSON必须包含：
+    pv_exist(boolean)、image_confidence(0到1)、grid(4x4数组)。
+    grid中的每个元素包含row、col、pv_probability(0到1)、status和reason。
+    status只能是positive、negative或unknown。证据不足时必须使用unknown，不能猜测为negative。
+    网格坐标相对于当前输入图像，row从上到下，col从左到右。
+    还要输出confusion_negatives数组，列出可能混淆的背景物体。
+reliability:
+  feature_size: 64
+  grid_size: 4
+  positive_probability: 0.55
+  negative_probability: 0.18
+  local_consistency: 0.45
+  feature_margin: 0.04
+  min_seed_pixels: 4
+  boundary_pixels: 1
+  gaussian_sigma_patches: 2.0
+  base_attention: 0.2
+  min_pseudo_retention: 0.5
+  positive_weight_floor: 0.35
+  unknown_weight: 0.15
+training:
+  epochs: 8
+  batch_size: 2
+  num_workers: 2
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  dice_weight: 1.0
+  focal_weight: 1.0
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  consistency_weight: 0.05
+  adapter_bottleneck: 256
+  decoder_channels: 128
+  adapter_mode: soft_film
+  threshold: 0.5
+  visualization_samples: 4
+  decode_at_image_size: true
+ablation:
+  seeds: [42, 43, 44]
+  variants: [baseline_decoder, semantic_adapter, semantic_no_adapter, shuffled_semantic]
+runtime:
+  output_dir: /kaggle/working/outputs_soft_v2
+  model_cache_dir: /kaggle/temp/model_cache
+  resume: true

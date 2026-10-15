@@ -70,17 +70,24 @@ def evaluate_sealed(config, root, logger):
             sizes[sample.sample_id] = image.size
         targets[sample.sample_id] = truth
         with np.load(root / "pseudo_cache" / f"{sample.sample_id}.npz") as cache:
-            for kind in ("heuristic", "raw", "filtered"):
+            kinds = ("soft",) if config.get("protocol", {}).get("mode") == "soft_semantic" else ("heuristic", "raw", "filtered")
+            for kind in kinds:
                 target = _to_native(cache[f"target_{kind}"], sizes[sample.sample_id])
                 quality[(sample.split, kind)].append(_sparse_quality(target, truth))
-            raw = _to_native(cache["teacher_raw"], sizes[sample.sample_id]).astype(bool)
-            consensus = _to_native(cache["teacher_consensus"], sizes[sample.sample_id]).astype(bool)
-            pseudo = _to_native(cache["target_filtered"], sizes[sample.sample_id]) == 1
+            if config.get("protocol", {}).get("mode") == "soft_semantic":
+                raw = _to_native(cache["teacher_candidate"], sizes[sample.sample_id]).astype(bool)
+                consensus = _to_native(cache["teacher_core"], sizes[sample.sample_id]).astype(bool)
+                pseudo = _to_native(cache["target_soft"], sizes[sample.sample_id]) == 1
+            else:
+                raw = _to_native(cache["teacher_raw"], sizes[sample.sample_id]).astype(bool)
+                consensus = _to_native(cache["teacher_consensus"], sizes[sample.sample_id]).astype(bool)
+                pseudo = _to_native(cache["target_filtered"], sizes[sample.sample_id]) == 1
         row = {"sample_id": sample.sample_id, "split": sample.split, "category": original.category,
                "has_pv_truth": bool(truth.any()), "accepted_proxy": diagnostics[sample.sample_id]["accepted"],
                "proxy_reason": diagnostics[sample.sample_id]["reason"],
                "view_iou": diagnostics[sample.sample_id]["view_iou"]}
-        for name, region in (("raw_box", raw), ("consensus_box", consensus), ("accepted_seed", pseudo)):
+        row_regions = (("teacher_candidate", raw), ("teacher_core", consensus), ("accepted_seed", pseudo))
+        for name, region in row_regions:
             meter = Confusion()
             meter.update(torch.from_numpy(region), torch.from_numpy(truth))
             row[name] = meter.compute()
@@ -135,8 +142,11 @@ def evaluate_sealed(config, root, logger):
                 key: {"mean": float(np.mean([m[key] for m in metrics])),
                       "std": float(np.std([m[key] for m in metrics], ddof=1)) if len(metrics) > 1 else None}
                 for key in keys} if metrics else {"images": 0, "interpretation": "No such images in hash-selected holdout"}
+    references = (("baseline_decoder", "semantic_adapter", "semantic_no_adapter", "shuffled_semantic")
+                  if config.get("protocol", {}).get("mode") == "soft_semantic"
+                  else ("heuristic_decoder", "filtered_decoder", "filtered_capacity", "filtered_shuffled"))
     bootstrap = {reference: paired_bootstrap(runs, reference=reference)
-                 for reference in ("heuristic_decoder", "filtered_decoder", "filtered_capacity", "filtered_shuffled")}
+                 for reference in references if any(r["variant"] == reference for r in runs)}
     for result in bootstrap.values():
         result["interpretation"] = ("Paired category-stratified image bootstrap on a fresh hash-selected pilot. "
                                     "Seeds share image draws. Does not account for spatial dependence or training-set uncertainty.")

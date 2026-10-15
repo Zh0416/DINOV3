@@ -131,6 +131,9 @@ def build_pseudo_targets(feature, fg_seed, bg_seed, prototypes, record, settings
 
 
 def generate_pseudo_cache(config, output_root, logger):
+    if config.get("protocol", {}).get("mode") == "soft_semantic":
+        from pvseg.soft_semantic import generate_soft_pseudo_cache
+        return generate_soft_pseudo_cache(config, output_root, logger)
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
     settings = config["reliability"]
     size = int(settings["feature_size"])

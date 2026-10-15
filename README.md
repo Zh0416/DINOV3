@@ -7,7 +7,8 @@ checkpoint selection. Training uses machine-generated partial pseudo-labels.
 Directory categories are not supervision.
 
 Active protocol: [ITERATION_PROTOCOL.md](ITERATION_PROTOCOL.md).
-Config: [configs/kaggle_label_free.yaml](configs/kaggle_label_free.yaml).
+Previous config: [configs/kaggle_label_free.yaml](configs/kaggle_label_free.yaml).
+New soft-semantic config: [configs/kaggle_soft_semantic.yaml](configs/kaggle_soft_semantic.yaml).
 Completed Kaggle v4 results: [LABEL_FREE_RESULTS.md](LABEL_FREE_RESULTS.md).
 Overall mIoU improved from .5061 to .7333, but B missed all PV pixels in the
 three hard-positive test images and falsely alarmed on both negative images.
@@ -19,20 +20,21 @@ supervised entry points are blocked by default.
 
 Use [notebooks/dinov3_pv_kaggle.ipynb](notebooks/dinov3_pv_kaggle.ipynb) in Kaggle
 zh0416/notebook468d03cea3 with pv-gf2, the historical teacher cache (only to exclude
-old RGBs), and the mounted DINOv3 SAT checkpoint. Select 120 fresh RGBs, split 84/36
-by content hash, extract features, run two-view InternVL, create pseudo-labels,
-then train seven controls x three seeds.
+old RGBs), and the mounted DINOv3 SAT checkpoint. The new soft-semantic protocol
+selects 120 RGBs while explicitly excluding the previous 120 RGB hashes, runs global
+and overlapping local InternVL grid views, keeps 0/1/255 machine targets, and trains
+paired A/B controls (plus no-adapter and shuffled-semantic controls) x three seeds.
 
 ```bash
 pip install -r requirements.txt
 pip install -e . --no-deps --no-build-isolation
-python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage prepare
-python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage features
-python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage teacher
-python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage pseudo
-python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage train
-python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage seal
-python scripts/09_final_evaluation.py --output-root /kaggle/working/outputs
+python scripts/08_label_free_pipeline.py --config configs/kaggle_soft_semantic.yaml --stage prepare
+python scripts/08_label_free_pipeline.py --config configs/kaggle_soft_semantic.yaml --stage features
+python scripts/08_label_free_pipeline.py --config configs/kaggle_soft_semantic.yaml --stage teacher
+python scripts/08_label_free_pipeline.py --config configs/kaggle_soft_semantic.yaml --stage pseudo
+python scripts/08_label_free_pipeline.py --config configs/kaggle_soft_semantic.yaml --stage train
+python scripts/08_label_free_pipeline.py --config configs/kaggle_soft_semantic.yaml --stage seal
+python scripts/09_final_evaluation.py --output-root /kaggle/working/outputs_soft_v2
 ```
 
 The image-only manifest has no annotation path or category. Pre-evaluation

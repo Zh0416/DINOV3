@@ -76,6 +76,18 @@ def prepare_rgb_manifest(config, output_root, logger):
                    if folder.is_dir() for p in folder.rglob("*")
                    if p.is_file() and p.suffix.lower() in extensions)
     excluded_names = set()
+    excluded_hashes_from_protocol = set()
+    hash_file = data.get("exclude_rgb_hash_file")
+    if hash_file:
+        hash_path = Path(hash_file)
+        if not hash_path.is_absolute():
+            hash_path = Path(config.get("_config_path", "")).resolve().parent / hash_path
+        if not hash_path.is_file():
+            raise RuntimeError(f"Configured RGB exclusion hash file is missing: {hash_path}")
+        payload = read_json(hash_path)
+        excluded_hashes_from_protocol = set(payload.get("rgb_sha256", []))
+        if payload.get("manual_labels_used", True):
+            raise RuntimeError("RGB exclusion manifest must not be derived from manual labels")
     cache_name = data.get("exclude_cache")
     cache_manifests = [p for p in Path(data["input_root"]).rglob("split_manifest.json")
                        if cache_name and cache_name in p.as_posix()]
@@ -85,7 +97,7 @@ def prepare_rgb_manifest(config, output_root, logger):
         # Extract image filenames only; no annotation or category fields are consumed.
         excluded_names.update(Path(row["image_path"]).name for row in read_json(path)["samples"])
     hashes = [(p, rgb_hash(p)) for p in paths]
-    excluded_hashes = {h for p, h in hashes if p.name in excluded_names}
+    excluded_hashes = {h for p, h in hashes if p.name in excluded_names} | excluded_hashes_from_protocol
     unique = {}
     for p, h in hashes:
         if h not in excluded_hashes:
@@ -110,6 +122,7 @@ def prepare_rgb_manifest(config, output_root, logger):
                                  "train" if index < train_count else "test"))
     payload = {"protocol": config["protocol"], "selection": "salted RGB content hash, no category stratification",
                "rgb_files_found": len(paths), "historical_unique_rgb_excluded": len(excluded_hashes),
+               "protocol_rgb_hashes_excluded": len(excluded_hashes_from_protocol),
                "duplicates_removed": len(hashes) - len({h for _, h in hashes}),
                "selected": len(samples), "train": train_count, "test": len(samples)-train_count,
                "rgb_dimensions_modes": dimensions, "manual_annotations_opened": 0,
@@ -150,12 +163,20 @@ class PseudoFeatureDataset(Dataset):
                               map_location="cpu", weights_only=True).float()
         with np.load(self.root / "pseudo_cache" / f"{sample.sample_id}.npz") as cache:
             target = cache[f"target_{self.pseudo_kind}"].copy()
+            if self.pseudo_kind == "soft" and "weight_soft" in cache:
+                pseudo_weight = cache["weight_soft"].copy()
+            else:
+                pseudo_weight = np.ones_like(target, dtype=np.float32)
         if self.attention_kind in ("zero", "ones"):
             attention = np.full(features.shape[-2:], float(self.attention_kind == "ones"), np.float32)
         else:
             donor = self.donors.get(sample.sample_id, sample.sample_id)
             with np.load(self.root / "pseudo_cache" / f"{donor}.npz") as cache:
-                attention = cache[f"attention_{self.attention_kind}"].copy()
-        return {"sample_id": sample.sample_id, "feature": features,
+                key = "attention_soft" if self.attention_kind == "shuffled" else f"attention_{self.attention_kind}"
+                attention = cache[key].copy()
+        item = {"sample_id": sample.sample_id, "feature": features,
                 "pseudo_target": torch.from_numpy(target.astype(np.int64)),
                 "attention": torch.from_numpy(attention).float()}
+        if self.pseudo_kind == "soft":
+            item["pseudo_weight"] = torch.from_numpy(pseudo_weight).float()
+        return item

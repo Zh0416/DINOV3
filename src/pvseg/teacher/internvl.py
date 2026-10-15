@@ -61,12 +61,48 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
         exists = raw_exists.strip().lower() in {"true", "1", "yes", "是"}
     else:
         exists = bool(raw_exists)
-    confidence = _probability(value.get("confidence", value.get("pv_probability", 0.0)))
+    confidence = _probability(value.get("confidence", value.get("image_confidence", value.get("pv_probability", 0.0))))
     boxes = sanitize_boxes(value.get("bbox", value.get("bboxes", [])), image_size) if exists else []
+    grid = []
+    raw_grid = value.get("grid", [])
+    if isinstance(raw_grid, list):
+        # Accept either a flat list of {row,col,...} objects or a nested grid.
+        if raw_grid and all(isinstance(row, list) for row in raw_grid):
+            for row_index, row in enumerate(raw_grid):
+                for col_index, item in enumerate(row):
+                    if isinstance(item, dict):
+                        item = {**item, "row": row_index, "col": col_index}
+                    if isinstance(item, dict):
+                        grid.append({
+                            "row": row_index, "col": col_index,
+                            "pv_probability": _probability(item.get("pv_probability", item.get("confidence", 0.0))),
+                            "status": str(item.get("status", "unknown")).lower()
+                            if str(item.get("status", "unknown")).lower() in {"positive", "negative", "unknown"}
+                            else "unknown",
+                            "reason": str(item.get("reason", ""))[:300],
+                        })
+        else:
+            for item in raw_grid:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    row, col = int(item["row"]), int(item["col"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                grid.append({
+                    "row": row, "col": col,
+                    "pv_probability": _probability(item.get("pv_probability", item.get("confidence", 0.0))),
+                    "status": str(item.get("status", "unknown")).lower()
+                    if str(item.get("status", "unknown")).lower() in {"positive", "negative", "unknown"}
+                    else "unknown",
+                    "reason": str(item.get("reason", ""))[:300],
+                })
     result = {
         "pv_exist": exists,
         "confidence": confidence,
         "bbox": boxes,
+        "grid": grid,
+        "confusion_negatives": value.get("confusion_negatives", []),
         "reason": str(value.get("reason", ""))[:1000],
         "raw_response": raw,
     }
@@ -113,11 +149,18 @@ def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int) -
 
 
 def _pixel_values(image_path: Union[str, Path], model: Any, max_patches: int,
-                  view: str = "original") -> tuple[torch.Tensor, int]:
+                  view: str = "original", crop_box: Optional[list[int]] = None) -> tuple[torch.Tensor, int]:
     from torchvision import transforms
 
     image_size = int(getattr(model.config, "force_image_size", 448) or 448)
     image = Image.open(image_path).convert("RGB")
+    if crop_box is not None:
+        left, top, right, bottom = crop_box
+        scale_x, scale_y = image.width / 1024.0, image.height / 1024.0
+        image = image.crop((
+            int(max(0, left) * scale_x), int(max(0, top) * scale_y),
+            int(min(1024, right) * scale_x), int(min(1024, bottom) * scale_y),
+        ))
     if view == "hflip":
         image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     elif view != "original":
@@ -209,9 +252,10 @@ class InternVLTeacher:
         raise RuntimeError(f"Could not load InternVL teacher: {last_error}")
 
     @torch.inference_mode()
-    def infer(self, image_path: Union[str, Path], view: str = "original") -> dict[str, Any]:
+    def infer(self, image_path: Union[str, Path], view: str = "original",
+              crop_box: Optional[list[int]] = None, prompt: Optional[str] = None) -> dict[str, Any]:
         values, patch_count = _pixel_values(
-            image_path, self.model, int(self.config.get("max_dynamic_patches", 6)), view
+            image_path, self.model, int(self.config.get("max_dynamic_patches", 6)), view, crop_box
         )
         generation = {
             "max_new_tokens": int(self.config.get("max_new_tokens", 256)),
@@ -221,13 +265,16 @@ class InternVLTeacher:
         raw = self.model.chat(
             self.tokenizer,
             values,
-            self.config["prompt"],
+            prompt or self.config["prompt"],
             generation,
             num_patches_list=[patch_count],
             verbose=False,
         )
         result = parse_teacher_response(raw, image_size=1024)
         result["patch_count"] = patch_count
+        if crop_box is not None:
+            result["crop_box"] = list(crop_box)
+        result["flipped"] = view == "hflip"
         del values
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
