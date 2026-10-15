@@ -8,6 +8,10 @@ Directory categories are not supervision.
 
 Active protocol: [ITERATION_PROTOCOL.md](ITERATION_PROTOCOL.md).
 Config: [configs/kaggle_label_free.yaml](configs/kaggle_label_free.yaml).
+Completed Kaggle v4 results: [LABEL_FREE_RESULTS.md](LABEL_FREE_RESULTS.md).
+Overall mIoU improved from .5061 to .7333, but B missed all PV pixels in the
+three hard-positive test images and falsely alarmed on both negative images.
+This pilot does not establish reliable hard-scene segmentation.
 Historical supervised v2/v3 pilots do not satisfy this constraint. Legacy
 supervised entry points are blocked by default.
 

@@ -1,5 +1,9 @@
 # Pilot Experiment Results
 
+Current final-evaluation-only Kaggle v4 results are reported separately in
+[LABEL_FREE_RESULTS.md](LABEL_FREE_RESULTS.md). This file preserves historical
+supervised results only.
+
 **Historical supervised pilot: NOT compliant with the user's final-evaluation-only
 Mask constraint. No result here validates the current label-free hypothesis.
 The former causal conclusion has been withdrawn; see ITERATION_PROTOCOL.md.**
