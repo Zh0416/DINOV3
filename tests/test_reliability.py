@@ -10,9 +10,17 @@ from pvseg.attention import save_attention_cache
 from pvseg.metrics import Confusion
 from pvseg.models.adapter import PVAwareAdapter, LegacyPVAwareAdapter
 from pvseg.reliability import TeacherReliability, filter_attention
+from pvseg.ablation_analysis import paired_bootstrap
+from pvseg.protocol import require_supervised_labels
 
 
 class ReliabilityTests(unittest.TestCase):
+    def test_final_only_labels_block_supervised_paths_by_default(self):
+        with self.assertRaisesRegex(RuntimeError, "final evaluation"):
+            require_supervised_labels({})
+        with self.assertRaises(RuntimeError):
+            require_supervised_labels({"protocol": {"label_usage": "final_evaluation_only"}})
+
     def test_empty_gate_identity_even_after_learning_biases(self):
         adapter = PVAwareAdapter(8, 4)
         with torch.no_grad():
@@ -25,6 +33,9 @@ class ReliabilityTests(unittest.TestCase):
         updated = adapter(feature, gate)
         self.assertTrue(torch.equal(updated[:, :, :, :2], feature[:, :, :, :2]))
         self.assertFalse(torch.equal(updated, feature))
+        full_update = adapter(feature, torch.ones_like(gate)) - feature
+        half_update = adapter(feature, torch.ones_like(gate)*.5) - feature
+        torch.testing.assert_close(half_update, full_update*.5, atol=2e-7, rtol=1e-4)
 
     def test_legacy_empty_attention_is_not_identity(self):
         feature = torch.randn(1, 8, 4, 4)
@@ -60,6 +71,15 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(result["overlap_miss_rate"], 1.)
         self.assertEqual(result["image_false_alarm_rate"], 1.)
         self.assertEqual(result["positive_images"], 1)
+
+    def test_paired_bootstrap_identical_predictions_have_zero_delta(self):
+        runs = []
+        for variant in ("baseline", "gated_filtered"):
+            for seed in (42, 43, 44):
+                rows = [{"sample_id": str(i), "category": "困难正样本", "tp": i+1, "fp": 2, "fn": 3, "tn": 20} for i in range(5)]
+                runs.append({"variant": variant, "seed": seed, "test": {"per_image": rows}})
+        result = paired_bootstrap(runs, repeats=20)
+        self.assertEqual(result["contrasts"]["all"]["gated_filtered"]["miou"]["ci95"], [0., 0.])
 
 
 if __name__ == "__main__":

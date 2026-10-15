@@ -1,5 +1,12 @@
 # Reliability iteration (Kaggle v3)
 
+**RETIRED: the user clarified that labels are for final evaluation only after
+v3 was submitted. The supervised training and train-label-fitted calibration below
+do not satisfy that requirement. Do not use v3 to support the intended hypothesis.
+The current default configuration blocks these training entry points before reading
+labels. A replacement training protocol must resolve whether segmentation supervision
+is allowed; no further cloud experiment is launched pending that clarification.**
+
 The first 300-image pilot did not establish that InternVL improves segmentation:
 overall mIoU/F1 fell while hard-positive recall increased. Its conclusion in
 `EXPERIMENT_RESULTS.md` must be read as exploratory; no capacity control was run.

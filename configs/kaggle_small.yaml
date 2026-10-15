@@ -1,5 +1,8 @@
 seed: 42
 
+protocol:
+  label_usage: final_evaluation_only
+
 data:
   input_root: /kaggle/input
   dataset_slug: pv-gf2

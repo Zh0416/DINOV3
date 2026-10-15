@@ -4,6 +4,12 @@ This repository tests whether semantic guidance from InternVL improves frozen
 DINOv3 features for photovoltaic (PV) segmentation in high-resolution remote
 sensing imagery.
 
+Current constraint: labels are reserved for final evaluation. The default config
+therefore blocks supervised training and label-fitted teacher reliability. Kaggle
+v2 and the submitted v3 are historical supervised pilots, not results satisfying
+this constraint. See [ITERATION_PROTOCOL.md](ITERATION_PROTOCOL.md). A label-free
+replacement protocol is pending clarification of the segmentation training scope.
+
 The project compares two controlled experiments on the same stratified split:
 
 - **Experiment A:** frozen DINOv3 ViT-L/16 SAT features + convolutional decoder.

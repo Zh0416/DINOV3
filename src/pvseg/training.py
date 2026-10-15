@@ -18,10 +18,12 @@ from pvseg.data import CachedFeatureDataset, load_split_manifest
 from pvseg.losses import DiceCrossEntropyLoss
 from pvseg.metrics import SegmentationMetrics, Confusion
 from pvseg.models import CachedFeatureSegmenter
+from pvseg.protocol import require_supervised_labels
 from pvseg.utils import atomic_write_json, read_json
 
 
 def train_experiments(config: dict[str, Any], output_root: Path, logger) -> dict[str, Any]:
+    require_supervised_labels(config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("Training is configured for a Kaggle GPU")
@@ -104,6 +106,7 @@ def _build_loaders(config, output_root, attention_dir):
 
 
 def _fit_experiment(name, model, loaders, loss_fn, config, output_root, device, logger):
+    require_supervised_labels(config)
     model = model.to(device)
     training = config["training"]
     optimizer = AdamW(

@@ -13,6 +13,7 @@ from pvseg.config import seed_everything
 from pvseg.data import load_split_manifest
 from pvseg.losses import DiceCrossEntropyLoss
 from pvseg.models import CachedFeatureSegmenter
+from pvseg.protocol import require_supervised_labels
 from pvseg.reliability import TeacherReliability, filter_attention
 from pvseg.teacher_audit import audit_teacher
 from pvseg.training import _build_loaders, _fit_experiment
@@ -42,6 +43,7 @@ def _write_maps(destination, maps):
 
 
 def run_ablations(config, output_root, logger):
+    require_supervised_labels(config)
     if not torch.cuda.is_available():
         raise RuntimeError("Run ablations on the cloud GPU; base weights stay in Kaggle")
     device = torch.device("cuda")
