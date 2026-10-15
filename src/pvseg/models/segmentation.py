@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .adapter import PVAwareAdapter
+from .adapter import PVAwareAdapter, LegacyPVAwareAdapter
 from .decoder import SegmentationDecoder
 
 
@@ -14,11 +14,14 @@ class CachedFeatureSegmenter(nn.Module):
         decoder_channels: int = 256,
         adapter_bottleneck: int = 256,
         use_adapter: bool = False,
+        adapter_mode: str = "gated",
     ):
         super().__init__()
         self.use_adapter = use_adapter
         self.adapter = (
-            PVAwareAdapter(feature_channels, adapter_bottleneck) if use_adapter else None
+            (LegacyPVAwareAdapter if adapter_mode == "legacy" else PVAwareAdapter)(
+                feature_channels, adapter_bottleneck
+            ) if use_adapter else None
         )
         self.decoder = SegmentationDecoder(feature_channels, decoder_channels, num_classes=2)
 

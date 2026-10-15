@@ -40,7 +40,7 @@ attention:
   feature_size: 64
 
 training:
-  epochs: 3
+  epochs: 8
   batch_size: 2
   num_workers: 2
   learning_rate: 0.0003
@@ -50,7 +50,10 @@ training:
   adapter_bottleneck: 256
   decoder_channels: 256
   threshold: 0.5
-  visualization_samples: 8
+  visualization_samples: 3
+
+ablation:
+  seeds: [42, 43, 44]
 
 runtime:
   output_dir: /kaggle/working/outputs

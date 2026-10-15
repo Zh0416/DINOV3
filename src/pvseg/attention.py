@@ -25,7 +25,7 @@ def sanitize_boxes(value: Any, image_size: int = 1024) -> list[list[int]]:
             continue
         try:
             x1, y1, x2, y2 = (int(round(float(number))) for number in item)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         x1, x2 = sorted((max(0, min(image_size - 1, x1)), max(0, min(image_size, x2))))
         y1, y2 = sorted((max(0, min(image_size - 1, y1)), max(0, min(image_size, y2))))
@@ -61,6 +61,7 @@ def save_attention_cache(
     image_size: int,
     feature_size: int,
     sigma: float,
+    confidence_threshold: float = 0.5,
 ) -> dict[str, int]:
     output_dir = Path(destination)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -69,8 +70,11 @@ def save_attention_cache(
     generated = 0
     empty = 0
     for record in records:
+        trusted = (record.get("status") == "ok" and record.get("pv_exist")
+                   and not record.get("parse_warning")
+                   and float(record.get("confidence", 0)) >= confidence_threshold)
         full, reduced = gaussian_attention_map(
-            record.get("bbox", []),
+            record.get("bbox", []) if trusted else [],
             image_size=image_size,
             feature_size=feature_size,
             sigma=sigma,

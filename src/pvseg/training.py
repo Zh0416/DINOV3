@@ -16,7 +16,7 @@ from pvseg.attention import save_attention_cache
 from pvseg.config import seed_everything
 from pvseg.data import CachedFeatureDataset, load_split_manifest
 from pvseg.losses import DiceCrossEntropyLoss
-from pvseg.metrics import SegmentationMetrics
+from pvseg.metrics import SegmentationMetrics, Confusion
 from pvseg.models import CachedFeatureSegmenter
 from pvseg.utils import atomic_write_json, read_json
 
@@ -40,6 +40,7 @@ def train_experiments(config: dict[str, Any], output_root: Path, logger) -> dict
         image_size=int(config["data"]["image_size"]),
         feature_size=int(config["attention"]["feature_size"]),
         sigma=float(config["attention"]["gaussian_sigma"]),
+        confidence_threshold=float(config["teacher"]["confidence_threshold"]),
     )
     atomic_write_json(output_root / "reports" / "attention_report.json", attention_report)
     loaders = _build_loaders(config, output_root, attention_dir)
@@ -97,6 +98,7 @@ def _build_loaders(config, output_root, attention_dir):
             num_workers=int(training["num_workers"]),
             pin_memory=True,
             persistent_workers=int(training["num_workers"]) > 0,
+            generator=torch.Generator().manual_seed(int(config["seed"])),
         )
     return loaders
 
@@ -117,6 +119,8 @@ def _fit_experiment(name, model, loaders, loss_fn, config, output_root, device, 
     best_miou = -1.0
     started = time.perf_counter()
     for epoch in range(1, int(training["epochs"]) + 1):
+        # Independent of model construction and other experiments' RNG consumption.
+        loaders["train"].generator.manual_seed(int(config["seed"]) + epoch)
         model.train()
         running_loss = 0.0
         batches = 0
@@ -162,6 +166,7 @@ def _fit_experiment(name, model, loaders, loss_fn, config, output_root, device, 
             )
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model_state"])
+    final_validation = _evaluate(model, loaders["val"], device, float(training["threshold"]))
     test_metrics = _evaluate(model, loaders["test"], device, float(training["threshold"]))
     visualization_dir = output_root / "visualizations" / name
     _save_prediction_visualizations(
@@ -177,6 +182,7 @@ def _fit_experiment(name, model, loaders, loss_fn, config, output_root, device, 
         "checkpoint": str(checkpoint_path),
         "history": history,
         "test": test_metrics,
+        "validation": final_validation,
         "elapsed_seconds": time.perf_counter() - started,
     }
     atomic_write_json(output_root / "reports" / f"{name}_results.json", result)
@@ -188,6 +194,7 @@ def _fit_experiment(name, model, loaders, loss_fn, config, output_root, device, 
 def _evaluate(model, loader, device, threshold):
     model.eval()
     metrics = SegmentationMetrics(threshold)
+    per_image = []
     for batch in loader:
         features = batch["feature"].to(device, non_blocking=True)
         attention = batch["attention"].to(device, non_blocking=True)
@@ -195,7 +202,14 @@ def _evaluate(model, loader, device, threshold):
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             logits = model(features, attention, target.shape[-2:])
         metrics.update(logits, target, list(batch["category"]))
-    return metrics.compute()
+        predictions = (logits.softmax(1)[:, 1] >= threshold).cpu()
+        for index, sample_id in enumerate(batch["sample_id"]):
+            meter = Confusion()
+            meter.update(predictions[index], target[index].cpu())
+            per_image.append({"sample_id": sample_id, "category": batch["category"][index], **meter.compute()})
+    result = metrics.compute()
+    result["per_image"] = per_image
+    return result
 
 
 @torch.inference_mode()
