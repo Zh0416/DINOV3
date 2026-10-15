@@ -95,7 +95,6 @@ def generate_grid_teacher(config, output_root, logger):
         if config["teacher"].get("local_views", True):
             for local_index, box in enumerate(local_boxes):
                 jobs.append((f"local_{local_index}", box, "original"))
-                jobs.append((f"local_{local_index}_hflip", box, "hflip"))
         for name, crop_box, view in jobs:
             try:
                 result = teacher.infer(sample.image_path, view=view, crop_box=crop_box, prompt=prompt)
@@ -120,7 +119,7 @@ def generate_grid_teacher(config, output_root, logger):
         "images": len(samples),
         "inferences": sum(len(r["views"]) for r in records),
         "global_views": 2,
-        "local_views_per_image": len(local_boxes) * 2 if config["teacher"].get("local_views", True) else 0,
+        "local_views_per_image": len(local_boxes) if config["teacher"].get("local_views", True) else 0,
         "elapsed_seconds": time.perf_counter() - started,
         "manual_labels_used": False,
         "self_confidence_is_calibrated": False,
