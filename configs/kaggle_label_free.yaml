@@ -1,0 +1,64 @@
+seed: 20261015
+protocol:
+  label_usage: final_evaluation_only
+  name: fresh120_pseudo_v1
+data:
+  input_root: /kaggle/input
+  dataset_slug: pv-gf2
+  categories: ["正样本", "困难正样本", "负样本"]
+  image_dir_name: images
+  label_dir_names: [labels, masks, mask]
+  extensions: [.bmp, .png, .jpg, .jpeg, .tif, .tiff]
+  image_size: 1024
+  max_samples: 120
+  train_fraction: 0.7
+  rgb_staging_dir: /kaggle/temp/label_free_rgb
+  exclude_cache: dinov3-pv-internvl-teacher-cache
+dino:
+  model_id: facebook/dinov3-vitl16-pretrain-sat493m
+  local_path_env: DINOV3_MODEL_PATH
+  timm_architecture: vit_large_patch16_dinov3
+  expected_hidden_dim: 1024
+  patch_size: 16
+  dtype: float16
+  attention_implementation: sdpa
+teacher:
+  model_id: OpenGVLab/InternVL3_5-4B
+  local_path_env: INTERNVL_MODEL_PATH
+  dtype: float16
+  quantization: auto
+  max_dynamic_patches: 4
+  max_new_tokens: 224
+  prompt: |
+    这是高分辨率遥感RGB影像。请判断是否存在太阳能光伏板。
+    只有看到光伏组件的视觉证据时才判为存在；深色屋顶、水面和阴影可能是干扰。
+    只输出JSON对象，包含pv_exist(boolean)、confidence(0到1的自评数值)、bbox(坐标列表)、reason(简短视觉依据)。
+    bbox为[[x_min,y_min,x_max,y_max], ...]，坐标基于整幅图像缩放到1024x1024后的左上角原点；不是单个切片坐标。
+    如果没有足够证据，pv_exist为false且bbox为[]。不要根据文件名推测内容。
+reliability:
+  view_iou_min: 0.5
+  box_area_min: 0.0005
+  box_area_max: 0.6
+  feature_margin: 0.04
+  feature_size: 64
+  min_seed_pixels: 4
+  gaussian_sigma_patches: 2.0
+training:
+  epochs: 8
+  batch_size: 2
+  num_workers: 2
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  dice_weight: 1.0
+  cross_entropy_weight: 1.0
+  consistency_weight: 0.1
+  adapter_bottleneck: 128
+  decoder_channels: 128
+  threshold: 0.5
+  visualization_samples: 4
+ablation:
+  seeds: [42, 43, 44]
+runtime:
+  output_dir: /kaggle/working/outputs
+  model_cache_dir: /kaggle/temp/model_cache
+  resume: false

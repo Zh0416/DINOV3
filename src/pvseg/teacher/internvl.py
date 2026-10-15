@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,8 @@ def _probability(value: Any) -> float:
     try:
         result = float(value)
     except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(result):
         return 0.0
     if result > 1.0:
         result /= 100.0
@@ -50,6 +53,9 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
             "bbox": bbox,
             "reason": text[:500],
         }
+    if not isinstance(value, dict):
+        value = {}
+        warning = "not_json_object"
     raw_exists = value.get("pv_exist", value.get("pv_exists", False))
     if isinstance(raw_exists, str):
         exists = raw_exists.strip().lower() in {"true", "1", "yes", "是"}
@@ -79,7 +85,18 @@ def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int) -
         for columns in range(1, max_patches + 1):
             if 1 <= rows * columns <= max_patches:
                 layouts.add((rows, columns))
-    rows, columns = min(layouts, key=lambda layout: abs(aspect_ratio - layout[1] / layout[0]))
+    # Official area tie-break: choose extra tiles only when the source has enough
+    # pixels. Ordering a set previously made equal-aspect-ratio choices arbitrary.
+    rows, columns = 1, 1
+    best_difference = float("inf")
+    for candidate in sorted(layouts, key=lambda layout: (layout[0]*layout[1], layout)):
+        difference = abs(aspect_ratio - candidate[1] / candidate[0])
+        if difference < best_difference or (
+            difference == best_difference
+            and width*height > .5 * image_size**2 * candidate[0]*candidate[1]
+        ):
+            rows, columns = candidate
+            best_difference = difference
     resized = image.resize((image_size * columns, image_size * rows), Image.Resampling.BICUBIC)
     return [
         resized.crop(
@@ -95,11 +112,16 @@ def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int) -
     ]
 
 
-def _pixel_values(image_path: Union[str, Path], model: Any, max_patches: int) -> tuple[torch.Tensor, int]:
+def _pixel_values(image_path: Union[str, Path], model: Any, max_patches: int,
+                  view: str = "original") -> tuple[torch.Tensor, int]:
     from torchvision import transforms
 
     image_size = int(getattr(model.config, "force_image_size", 448) or 448)
     image = Image.open(image_path).convert("RGB")
+    if view == "hflip":
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    elif view != "original":
+        raise ValueError(f"Unknown teacher view: {view}")
     tiles = _dynamic_preprocess(image, image_size, max_patches)
     transform = transforms.Compose(
         [
@@ -175,6 +197,8 @@ class InternVLTeacher:
             try:
                 logger.info("Loading InternVL from %s with quantization=%s", reference, quantization)
                 model = AutoModel.from_pretrained(reference, **kwargs).eval()
+                for parameter in model.parameters():
+                    parameter.requires_grad_(False)
                 return cls(model=model, tokenizer=tokenizer, config=config)
             except (RuntimeError, ValueError, ImportError, OSError, AttributeError) as error:
                 last_error = error
@@ -185,9 +209,9 @@ class InternVLTeacher:
         raise RuntimeError(f"Could not load InternVL teacher: {last_error}")
 
     @torch.inference_mode()
-    def infer(self, image_path: Union[str, Path]) -> dict[str, Any]:
+    def infer(self, image_path: Union[str, Path], view: str = "original") -> dict[str, Any]:
         values, patch_count = _pixel_values(
-            image_path, self.model, int(self.config.get("max_dynamic_patches", 6))
+            image_path, self.model, int(self.config.get("max_dynamic_patches", 6)), view
         )
         generation = {
             "max_new_tokens": int(self.config.get("max_new_tokens", 256)),

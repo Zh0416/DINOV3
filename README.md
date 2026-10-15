@@ -1,75 +1,74 @@
-# Multimodal Teacher Guided DINOv3 Adapter for Photovoltaic Segmentation
+# Multimodal Teacher Guided DINOv3 Adapter for PV Segmentation
 
-This repository tests whether semantic guidance from InternVL improves frozen
-DINOv3 features for photovoltaic (PV) segmentation in high-resolution remote
-sensing imagery.
+Test whether frozen InternVL guidance improves frozen DINOv3 SAT features for
+remote-sensing photovoltaic segmentation. **Manual masks are for final evaluation
+only**, including no Mask-based Dice/CE, teacher calibration, threshold tuning or
+checkpoint selection. Training uses machine-generated partial pseudo-labels.
+Directory categories are not supervision.
 
-Current constraint: labels are reserved for final evaluation. The default config
-therefore blocks supervised training and label-fitted teacher reliability. Kaggle
-v2 and the submitted v3 are historical supervised pilots, not results satisfying
-this constraint. See [ITERATION_PROTOCOL.md](ITERATION_PROTOCOL.md). A label-free
-replacement protocol is pending clarification of the segmentation training scope.
+Active protocol: [ITERATION_PROTOCOL.md](ITERATION_PROTOCOL.md).
+Config: [configs/kaggle_label_free.yaml](configs/kaggle_label_free.yaml).
+Historical supervised v2/v3 pilots do not satisfy this constraint. Legacy
+supervised entry points are blocked by default.
 
-The project compares two controlled experiments on the same stratified split:
+## Cloud workflow
 
-- **Experiment A:** frozen DINOv3 ViT-L/16 SAT features + convolutional decoder.
-- **Experiment B:** frozen DINOv3 features + InternVL Gaussian attention +
-  PV-aware adapter + the same decoder architecture.
-
-The default Kaggle run uses at most 300 images (100 per category when
-available), split 70/15/15 with seed 42. The dataset is expected to contain
-`正样本`, `困难正样本`, and `负样本` directories with paired `images` and
-`labels` subdirectories.
-
-## Cloud-only model weights
-
-Model weights are never committed to this repository and are not downloaded by
-the local test suite. On Kaggle, Hugging Face caches are directed to the
-ephemeral `/kaggle/temp/model_cache` directory. The supplied Kaggle notebook
-mounts a safetensors/timm mirror of the ViT-L/16 SAT checkpoint and exposes it
-through `DINOV3_MODEL_PATH`; this avoids persisting weights locally. For other
-environments, set the Kaggle secret `HF_TOKEN` for the official gated checkpoint
-or point `DINOV3_MODEL_PATH`/`INTERNVL_MODEL_PATH` at a mounted cloud path.
-
-Default checkpoints:
-
-- `facebook/dinov3-vitl16-pretrain-sat493m`
-- `OpenGVLab/InternVL3_5-4B`
-
-## Pipeline
+Use [notebooks/dinov3_pv_kaggle.ipynb](notebooks/dinov3_pv_kaggle.ipynb) in Kaggle
+zh0416/notebook468d03cea3 with pv-gf2, the historical teacher cache (only to exclude
+old RGBs), and the mounted DINOv3 SAT checkpoint. Select 120 fresh RGBs, split 84/36
+by content hash, extract features, run two-view InternVL, create pseudo-labels,
+then train seven controls x three seeds.
 
 ```bash
 pip install -r requirements.txt
 pip install -e . --no-deps --no-build-isolation
-
-python scripts/01_inspect_data.py --config configs/kaggle_small.yaml
-python scripts/02_generate_teacher.py --config configs/kaggle_small.yaml
-python scripts/03_cache_dino_features.py --config configs/kaggle_small.yaml
-python scripts/04_train_experiments.py --config configs/kaggle_small.yaml
-python scripts/05_compare_experiments.py --config configs/kaggle_small.yaml
+python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage prepare
+python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage features
+python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage teacher
+python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage pseudo
+python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage train
+python scripts/08_label_free_pipeline.py --config configs/kaggle_label_free.yaml --stage seal
+python scripts/09_final_evaluation.py --output-root /kaggle/working/outputs
 ```
 
-Every stage logs to both stdout and `/kaggle/working/outputs/logs`. Outputs
-include the split manifest, data inspection figures, `semantic_prompt.json`,
-Gaussian attention maps, DINOv3 feature caches, best checkpoints, prediction
-visualizations, per-category metrics, and the final A/B comparison report.
+The image-only manifest has no annotation path or category. Pre-evaluation
+processes block accidental reads from annotation directories. Prototypes use only
+training RGBs. Teacher failure/disagreement means abstention, not background.
+Epochs/threshold are fixed before annotation access. Final evaluation verifies
+SHA256 hashes of predictions and decision artifacts before reading GT.
 
-The Kaggle entry point is [notebooks/dinov3_pv_kaggle.ipynb](notebooks/dinov3_pv_kaggle.ipynb).
+## Reliability and controls
 
-## Metrics
+Cross-view box agreement, fixed RGB appearance seeds and train-only DINO cosine
+margin filter teacher proposals. Self-reported confidence is logged, not treated
+as correctness probability. Consistent hallucinations remain possible. Final
+audits measure pseudo-label precision/coverage and false acceptance, without
+feeding back into thresholds or weights.
 
-The evaluation reports PV IoU, two-class mIoU, F1/Dice, precision, recall,
-pixel false-negative rate, hard-positive image miss rate, and negative image
-false-alarm rate. The comparison script does not assume that the adapter wins;
-it reports the measured deltas.
+A is explicitly an RGB/DINO heuristic decoder baseline: DINO alone has no PV
+class identity without supervision. B adds filtered teacher pseudo-supervision
+and an attention adapter. Same-pseudo decoder, capacity and shuffled-attention
+controls separate supervision, parameter count and spatial guidance. Improvement
+is not assumed. Small/spatially correlated holdouts limit conclusions.
 
-The completed 300-image pilot and its hard-positive trade-off are documented in
-[EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md).
+## Outputs and weights
 
-## Tests
+Each stage logs to stdout and /kaggle/working/outputs/logs. Reports include sample
+counts, teacher responses, rejection reasons, pseudo support, losses, final
+per-image/per-category metrics and paired bootstrap CIs. Cloud outputs retain last
+checkpoints, full prediction masks, a hash seal and fixed-order visualizations.
 
-The local test suite uses synthetic tensors and temporary images only:
+Base weights/cache stay in /kaggle/temp/model_cache; checkpoints/features stay in
+Kaggle. Neither is downloaded locally or committed. Use the mounted timm mirror
+via DINOV3_MODEL_PATH or the official gated checkpoint with Kaggle HF_TOKEN.
+Teacher: OpenGVLab/InternVL3_5-4B.
+
+## Synthetic verification
 
 ```bash
-python -m pytest -q
+python -m unittest discover -s tests -p "test_*.py"
 ```
+
+Tests cover annotation isolation, ignored-region gradients, flip coordinates,
+train-only prototypes, empty-gate identity, artifact tamper detection and a
+synthetic train/seal/final-evaluation smoke test. They download no model weights.

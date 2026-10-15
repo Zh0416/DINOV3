@@ -20,6 +20,8 @@ class ReliabilityTests(unittest.TestCase):
             require_supervised_labels({})
         with self.assertRaises(RuntimeError):
             require_supervised_labels({"protocol": {"label_usage": "final_evaluation_only"}})
+        with self.assertRaises(RuntimeError):
+            require_supervised_labels({"protocol": {"label_usage": "supervised_training"}})
 
     def test_empty_gate_identity_even_after_learning_biases(self):
         adapter = PVAwareAdapter(8, 4)

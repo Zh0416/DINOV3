@@ -26,6 +26,9 @@ def paired_bootstrap(runs, reference="baseline", repeats=2000, seed=20261015):
               "reference": reference, "contrasts": {}}
     for group in ("all", "困难正样本"):
         selected = np.arange(len(ids)) if group == "all" else np.flatnonzero(categories == group)
+        if not len(selected):
+            result["contrasts"][group] = {"images": 0, "interpretation": "No images for this subgroup"}
+            continue
         parts = [selected[categories[selected] == cat] for cat in sorted(set(categories[selected]))]
         draws = np.concatenate([rng.choice(part, size=(repeats, len(part)), replace=True) for part in parts], axis=1)
         by_variant = {}

@@ -1,5 +1,9 @@
 # Pilot Experiment Results
 
+**Historical supervised pilot: NOT compliant with the user's final-evaluation-only
+Mask constraint. No result here validates the current label-free hypothesis.
+The former causal conclusion has been withdrawn; see ITERATION_PROTOCOL.md.**
+
 Kaggle Notebook: `zh0416/notebook468d03cea3`, version 2  
 Git commit used by the run: `6fdcb60`  
 Status: `COMPLETE`
@@ -44,11 +48,11 @@ rate increased from 26.67% to 33.33%.
 
 ## Conclusion
 
-This pilot partially supports the hypothesis. InternVL semantic guidance improved
-recall and reduced missed hard-positive scenes, but did not improve overall mIoU or
-F1 under the current direct multiplicative attention and three-epoch training setup.
-The next experiment should tune attention strength or use a learnable gate so the
-adapter can retain the recall benefit without the observed precision penalty.
+This pilot does not establish support for the intended hypothesis. Recall rose
+while precision, overall mIoU and F1 fell. No capacity or shuffled-location control
+was run, so gains cannot be attributed specifically to teacher semantics. Both
+models used manual Mask training; their checkpoints and label-fitted calibrators
+must not be reused by the current protocol.
 
 Cloud outputs include both best checkpoints, 16 prediction visualizations, the data
 inspection visualization, full-resolution and 64 x 64 attention maps, stage logs,

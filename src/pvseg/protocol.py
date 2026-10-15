@@ -2,9 +2,8 @@
 
 
 def require_supervised_labels(config):
-    if config.get("protocol", {}).get("label_usage", "final_evaluation_only") != "supervised_training":
-        raise RuntimeError(
-            "Labels are reserved for final evaluation. Supervised Dice/CE training and "
-            "label-fitted teacher reliability are disabled. Define a label-free training "
-            "protocol before running a new experiment."
-        )
+    raise RuntimeError(
+        "Labels are reserved for final evaluation. Historical supervised Dice/CE "
+        "training and label-fitted teacher reliability entry points are retired. "
+        "Use scripts/08_label_free_pipeline.py; no config flag re-enables Mask training."
+    )

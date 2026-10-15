@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from pvseg.config import configure_cloud_cache
 from pvseg.data import ImageMaskDataset, load_split_manifest
+from pvseg.label_free_data import RGBDataset, load_rgb_manifest
 from pvseg.models import FrozenDINOv3
 from pvseg.utils import atomic_write_json
 
@@ -18,10 +19,13 @@ def cache_dino_features(config: dict[str, Any], output_root: Path, logger) -> di
     if not torch.cuda.is_available():
         raise RuntimeError("DINOv3 feature extraction requires a Kaggle GPU")
     configure_cloud_cache(config)
-    manifest_path = output_root / "split_manifest.json"
-    samples = load_split_manifest(manifest_path)
     image_size = int(config["data"]["image_size"])
-    dataset = ImageMaskDataset(samples, image_size)
+    if config.get("protocol", {}).get("label_usage") == "final_evaluation_only":
+        samples = load_rgb_manifest(output_root / "rgb_manifest.json")
+        dataset = RGBDataset(samples, image_size)
+    else:
+        samples = load_split_manifest(output_root / "split_manifest.json")
+        dataset = ImageMaskDataset(samples, image_size)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
     feature_dir = output_root / "feature_cache"
     feature_dir.mkdir(parents=True, exist_ok=True)
