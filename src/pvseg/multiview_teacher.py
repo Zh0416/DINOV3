@@ -9,8 +9,9 @@ import torch
 
 from pvseg.config import configure_cloud_cache
 from pvseg.label_free_data import load_rgb_manifest
-from pvseg.teacher import InternVLTeacher
-from pvseg.utils import atomic_write_json
+from pvseg.teacher import InternVLTeacher, parse_teacher_response
+from pvseg.teacher.internvl import GRID_PARSER_VERSION
+from pvseg.utils import atomic_write_json, read_json
 
 
 def restore_hflip_boxes(boxes, size=1024):
@@ -67,35 +68,75 @@ def _error_view(crop_box=None, flipped=False, error=""):
             "reason": "", "crop_box": crop_box, "flipped": flipped, "error": str(error)}
 
 
+def reparse_grid_record(record):
+    """Migrate saved raw responses without inference or changes to view geometry."""
+    views = {}
+    for name, view in record.get("views", {}).items():
+        migrated = dict(view)
+        raw = view.get("raw_response")
+        if view.get("status") == "ok" and isinstance(raw, str) and raw.strip():
+            migrated.pop("parse_warning", None)
+            migrated.update(parse_teacher_response(raw))
+            migrated["grid_parser_version"] = GRID_PARSER_VERSION
+        views[name] = migrated
+    return {**record, "views": views}
+
+
 def generate_grid_teacher(config, output_root, logger):
     """Generate full-image and overlapping local grid evidence, never hard boxes."""
-    if not torch.cuda.is_available():
-        raise RuntimeError("InternVL inference must run on a cloud GPU")
-    configure_cloud_cache(config)
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
     destination = output_root / "semantic_prompt.json"
-    existing = {}
+    existing, payload = {}, {}
     if config["runtime"].get("resume", True) and destination.is_file():
-        try:
-            existing = {row["sample_id"]: row for row in __import__("pvseg.utils", fromlist=["read_json"]).read_json(destination).get("records", [])}
-        except (OSError, KeyError, TypeError, ValueError):
-            existing = {}
-    teacher = InternVLTeacher.load(config["teacher"], logger)
-    records, started = [], time.perf_counter()
+        # A broken cache must not silently trigger another full teacher run.
+        payload = read_json(destination)
+        if payload.get("teacher_model", config["teacher"]["model_id"]) != config["teacher"]["model_id"]:
+            raise ValueError("Cached teacher model differs; use a separate output directory")
+        existing = {row["sample_id"]: row for row in payload.get("records", [])}
+    teacher, started = None, time.perf_counter()
+    records, reused_views, reparsed_views, new_inferences = {}, 0, 0, 0
     prompt = config["teacher"]["prompt"]
     local_boxes = _overlapping_quadrants()
-    for index, sample in enumerate(samples):
-        if sample.sample_id in existing:
-            record = existing[sample.sample_id]
-            records.append(record)
-            logger.info("Soft teacher image %d/%d resumed=%s", index + 1, len(samples), sample.sample_id)
+    jobs = [("original", None, "original"), ("hflip", None, "hflip")]
+    if config["teacher"].get("local_views", True):
+        jobs.extend((f"local_{index}", box, "original") for index, box in enumerate(local_boxes))
+
+    def save_records():
+        atomic_write_json(destination, {
+            "teacher_model": config["teacher"]["model_id"], "prompt": prompt,
+            "coordinates": "4x4 grid coordinates are relative to each view; crop_box is in original 1024 frame",
+            "schema": "grid_v2", "grid_parser_version": GRID_PARSER_VERSION,
+            "generation_provenance": "Each view retains its generation_prompt and teacher_model",
+            "records": [records[s.sample_id] for s in samples if s.sample_id in records]})
+
+    for sample in samples:
+        if sample.sample_id not in existing:
             continue
-        views = {}
-        jobs = [("original", None, "original"), ("hflip", None, "hflip")]
-        if config["teacher"].get("local_views", True):
-            for local_index, box in enumerate(local_boxes):
-                jobs.append((f"local_{local_index}", box, "original"))
+        record = reparse_grid_record(existing[sample.sample_id])
+        for view in record["views"].values():
+            view.setdefault("generation_prompt", payload.get("prompt"))
+            view.setdefault("teacher_model", payload.get("teacher_model"))
+            if view.get("status") == "ok" and view.get("raw_response"):
+                reparsed_views += 1
+        records[sample.sample_id] = record
+    if records:
+        # Persist migration even if all views are reused or a later GPU job fails.
+        save_records()
+
+    for index, sample in enumerate(samples):
+        record = records.get(sample.sample_id, {"sample_id": sample.sample_id, "views": {}})
+        views = record["views"]
         for name, crop_box, view in jobs:
+            cached = views.get(name, {})
+            if cached.get("status") == "ok" and (cached.get("raw_response") or cached.get("grid")):
+                reused_views += 1
+                continue
+            if teacher is None:
+                if not torch.cuda.is_available():
+                    raise RuntimeError("Uncached InternVL inference must run on a cloud GPU")
+                configure_cloud_cache(config)
+                teacher = InternVLTeacher.load(config["teacher"], logger)
+            new_inferences += 1
             try:
                 result = teacher.infer(sample.image_path, view=view, crop_box=crop_box, prompt=prompt)
                 result["status"] = "ok"
@@ -104,20 +145,20 @@ def generate_grid_teacher(config, output_root, logger):
             except Exception as error:
                 logger.exception("Soft teacher failed: image=%s view=%s", sample.sample_id, name)
                 result = _error_view(crop_box, view == "hflip", error)
+            result.update({"grid_parser_version": GRID_PARSER_VERSION,
+                           "generation_prompt": prompt, "teacher_model": config["teacher"]["model_id"]})
             views[name] = result
-        record = {"sample_id": sample.sample_id, "views": views,
-                  "grid_size": int(config["reliability"].get("grid_size", 4)),
-                  "teacher_schema": "grid_v2"}
-        records.append(record)
-        atomic_write_json(destination, {
-            "teacher_model": config["teacher"]["model_id"], "prompt": prompt,
-            "coordinates": "4x4 grid coordinates are relative to each view; crop_box is in original 1024 frame",
-            "schema": "grid_v2", "records": records})
+        record.update({"grid_size": int(config["reliability"].get("grid_size", 4)), "teacher_schema": "grid_v2"})
+        records[sample.sample_id] = record
+        save_records()
         logger.info("Soft teacher image %d/%d views=%d elapsed=%.1fs", index + 1, len(samples),
                     len(views), time.perf_counter() - started)
     report = {
         "images": len(samples),
-        "inferences": sum(len(r["views"]) for r in records),
+        "inferences": sum(len(r["views"]) for r in records.values()),
+        "new_inferences": new_inferences,
+        "reused_views": reused_views,
+        "reparsed_views": reparsed_views,
         "global_views": 2,
         "local_views_per_image": len(local_boxes) if config["teacher"].get("local_views", True) else 0,
         "elapsed_seconds": time.perf_counter() - started,

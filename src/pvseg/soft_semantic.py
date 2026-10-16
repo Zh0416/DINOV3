@@ -26,10 +26,12 @@ def _grid_array(view: dict[str, Any], grid_size: int) -> np.ndarray:
         except (KeyError, TypeError, ValueError):
             continue
         if 0 <= row < grid_size and 0 <= col < grid_size and np.isfinite(probability):
-            # A malformed response occasionally reports a high numeric value
-            # together with status=negative.  Treat that contradiction as no
-            # positive evidence, while leaving unknown cells soft and usable.
-            if str(item.get("status", "unknown")).lower() == "negative":
+            status = str(item.get("status", "unknown")).lower()
+            # Unknown cells abstain even if their numeric probability is high.
+            # Other views can still provide independent evidence at this location.
+            if status not in {"positive", "negative"}:
+                continue
+            if status == "negative":
                 probability = 0.0
             result[row, col] = np.clip(probability, 0.0, 1.0)
     return result
@@ -79,6 +81,8 @@ def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tup
         # cells.  Use those cells as weak evidence; only abstain when the view
         # is not successful or has no usable grid at all.
         if view.get("status") != "ok" or not isinstance(view.get("grid"), list) or not view.get("grid"):
+            continue
+        if not np.isfinite(_grid_array(view, grid_size)).any():
             continue
         crop = view.get("crop_box")
         maps.append(_view_heatmap(view, size, image_size, crop, bool(view.get("flipped")), grid_size))

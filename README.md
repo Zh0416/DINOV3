@@ -69,6 +69,27 @@ Kaggle. Neither is downloaded locally or committed. Use the mounted timm mirror
 via DINOV3_MODEL_PATH or the official gated checkpoint with Kaggle HF_TOKEN.
 Teacher: OpenGVLab/InternVL3_5-4B.
 
+## Small smoke tests and cache recovery
+
+Run a four-image cloud smoke before the full protocol. It keeps six teacher
+views per image, trains A/B for one epoch and verifies the prediction seal,
+without opening manual masks or reporting accuracy. Use a new output directory:
+
+```bash
+python scripts/10_smoke_soft_semantic.py --config configs/kaggle_soft_semantic.yaml --output-root /kaggle/working/soft_smoke --samples 4
+```
+
+For a CPU-only replay of four saved v6 images, add
+`--replay-cache /path/to/semantic_prompt.json`. This tests cache migration and
+attention fusion without loading models or opening images. Results are written
+to `smoke_report.json`; this mode does not test feature extraction or training.
+
+Resuming the grid teacher reparses cached raw responses and preserves their
+generation prompt and view geometry. Fully cached runs do not load InternVL or
+require CUDA; only missing/failed views trigger inference. Unknown grid cells
+abstain regardless of their numeric probability. When changing the frozen
+protocol, prepare a new output directory; do not edit an old frozen config or seal.
+
 ## Synthetic verification
 
 ```bash

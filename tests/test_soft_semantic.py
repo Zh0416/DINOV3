@@ -2,6 +2,7 @@ import unittest
 import logging
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -13,7 +14,7 @@ from pvseg.label_free_training import train_label_free
 from pvseg.models import CachedFeatureSegmenter
 from pvseg.pseudo_labels import generate_pseudo_cache
 from pvseg.prediction_seal import seal_predictions
-from pvseg.soft_semantic import fuse_soft_attention
+from pvseg.soft_semantic import build_soft_pseudo_targets, fuse_soft_attention
 from pvseg.teacher import parse_teacher_response
 from pvseg.utils import atomic_write_json
 
@@ -61,6 +62,30 @@ class SoftSemanticTests(unittest.TestCase):
             "feature_size": 8, "grid_size": 4, "base_attention": .2, "gaussian_sigma_patches": .5
         })
         self.assertAlmostEqual(float(attention.max()), .2, places=5)
+
+    def test_high_probability_unknown_cannot_seed_positive_targets(self):
+        size = 64
+        record = {"views": {"original": {
+            "status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .95, "status": "unknown"}]
+        }}}
+        feature = np.zeros((2, size, size), np.float32)
+        feature[1] = 1.  # Even independent appearance support cannot turn abstention into semantic evidence.
+        settings = {"feature_size": size, "grid_size": 4, "base_attention": .2,
+                    "positive_probability": .55, "feature_margin": .04, "gaussian_sigma_patches": 2.}
+        with patch("pvseg.soft_semantic.rgb_seeds", return_value=(np.ones((size, size), bool), np.zeros((size, size), bool))):
+            arrays, diagnostic = build_soft_pseudo_targets(feature, "unused", np.eye(2), record, settings)
+        self.assertTrue(diagnostic["teacher_abstained"])
+        self.assertEqual(diagnostic["positive_pixels"], 0)
+        self.assertTrue((arrays["target_soft"] == 255).all())
+
+    def test_positive_view_still_supplies_evidence_where_another_view_is_unknown(self):
+        record = {"views": {
+            "original": {"status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .95, "status": "unknown"}]},
+            "local": {"status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .8, "status": "positive"}]},
+        }}
+        attention, diagnostic = fuse_soft_attention(record, {"feature_size": 64, "gaussian_sigma_patches": 2.})
+        self.assertEqual(diagnostic["teacher_views_used"], 1)
+        self.assertGreater(float(attention.max()), .7)
 
     def test_zero_initialized_adapter_is_identity(self):
         model = CachedFeatureSegmenter(16, 16, 8, use_adapter=True, adapter_mode="soft_film")

@@ -16,6 +16,9 @@ from pvseg.attention import sanitize_boxes
 from pvseg.utils import model_reference
 
 
+GRID_PARSER_VERSION = 2
+
+
 def _probability(value: Any) -> float:
     try:
         result = float(value)
@@ -52,12 +55,6 @@ def _grid_item_from_fragment(fragment: str, index: int, grid_size: int) -> dict[
         row, col = divmod(index, grid_size)
     else:
         row, col = int(row_text), int(col_text)
-    # Some responses use human-facing 1..4 coordinates despite the prompt's
-    # zero-based convention.  Convert only when the whole item is out of range.
-    if (row >= grid_size or col >= grid_size) and 1 <= row <= grid_size and 1 <= col <= grid_size:
-        row, col = row - 1, col - 1
-    if not (0 <= row < grid_size and 0 <= col < grid_size):
-        return None
     status = (field(r'"status"\s*:\s*"([^"]*)"') or "unknown").lower()
     if status not in {"positive", "negative", "unknown"}:
         status = "unknown"
@@ -70,14 +67,28 @@ def _grid_item_from_fragment(fragment: str, index: int, grid_size: int) -> dict[
     }
 
 
+def _normalize_grid_coordinates(items: list[dict[str, Any]], grid_size: int = 4) -> list[dict[str, Any]]:
+    # Infer the convention once for the entire response. An observed 4 without
+    # any zero disambiguates 1..4; an incomplete 1..3 prefix remains zero-based.
+    one_based = bool(items) and all(
+        1 <= item["row"] <= grid_size and 1 <= item["col"] <= grid_size for item in items
+    ) and any(item["row"] == grid_size or item["col"] == grid_size for item in items)
+    normalized = {}
+    for item in items:
+        row, col = item["row"] - int(one_based), item["col"] - int(one_based)
+        if 0 <= row < grid_size and 0 <= col < grid_size:
+            normalized[(row, col)] = {**item, "row": row, "col": col}
+    return [normalized[key] for key in sorted(normalized)]
+
+
 def _recover_grid_from_truncated_text(text: str, grid_size: int = 4) -> list[dict[str, Any]]:
     """Extract complete grid-cell objects from otherwise invalid JSON text."""
-    recovered: dict[tuple[int, int], dict[str, Any]] = {}
-    for index, match in enumerate(re.finditer(r"\{[^{}]*\}", text, flags=re.DOTALL)):
-        item = _grid_item_from_fragment(match.group(0), index, grid_size)
+    recovered = []
+    for match in re.finditer(r"\{[^{}]*\}", text, flags=re.DOTALL):
+        item = _grid_item_from_fragment(match.group(0), len(recovered), grid_size)
         if item is not None:
-            recovered[(item["row"], item["col"])] = item
-    return [recovered[key] for key in sorted(recovered)]
+            recovered.append(item)
+    return _normalize_grid_coordinates(recovered, grid_size)
 
 
 def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
@@ -151,6 +162,7 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
                     else "unknown",
                     "reason": str(item.get("reason", ""))[:300],
                 })
+    grid = _normalize_grid_coordinates(grid)
     if not grid and recovered_grid:
         grid = recovered_grid
     result = {

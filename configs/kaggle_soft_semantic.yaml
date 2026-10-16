@@ -40,7 +40,7 @@ teacher:
     pv_exist(boolean)、image_confidence(0到1)、grid(4x4数组)。
     grid中的每个元素只包含row、col、pv_probability(0到1)和status，不要输出逐格reason，以免截断。
     status只能是positive、negative或unknown。证据不足时必须使用unknown，不能猜测为negative。
-    网格坐标相对于当前输入图像，row从上到下，col从左到右。
+    网格坐标相对于当前输入图像，row从上到下、col从左到右，均使用0、1、2、3编号。
     还要输出confusion_negatives数组，列出可能混淆的背景物体。
 reliability:
   feature_size: 64
