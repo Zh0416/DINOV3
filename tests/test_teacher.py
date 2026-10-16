@@ -19,6 +19,27 @@ class TeacherParserTests(unittest.TestCase):
         self.assertFalse(result["pv_exist"])
         self.assertEqual(result["bbox"], [])
 
+    def test_grid_teacher_does_not_require_bbox(self):
+        result = parse_teacher_response(
+            '{"pv_exist": true, "image_confidence": 0.8, '
+            '"grid": [[{"pv_probability": 0.9, "status": "positive"}]]}'
+        )
+        self.assertEqual(len(result["grid"]), 1)
+        self.assertNotEqual(result.get("parse_warning"), "pv_exists_without_valid_bbox")
+
+    def test_truncated_grid_recovers_complete_cells(self):
+        raw = (
+            '```json\n{"pv_exist":true,"image_confidence":0.9,"grid":['
+            '[{"row":0,"col":0,"pv_probability":0.9,"status":"positive"},'
+            '{"row":0,"col":1,"pv_probability":0.8,"status":"positive"},'
+            '{"row":0,"col":2,"pv_probability":0.1,"status":"unknown"},'
+            '{"row":0,"col":3,"pv_probability":'
+        )
+        result = parse_teacher_response(raw)
+        self.assertEqual(len(result["grid"]), 3)
+        self.assertEqual(result["grid"][0]["status"], "positive")
+        self.assertEqual(result.get("parse_warning"), "truncated_json_recovered_grid")
+
 
 if __name__ == "__main__":
     unittest.main()

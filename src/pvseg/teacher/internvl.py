@@ -28,16 +28,70 @@ def _probability(value: Any) -> float:
     return max(0.0, min(1.0, result))
 
 
+def _grid_item_from_fragment(fragment: str, index: int, grid_size: int) -> dict[str, Any] | None:
+    """Recover one compact grid item from a complete JSON fragment.
+
+    InternVL can stop mid-response when a verbose 4x4 answer exceeds the token
+    budget.  Complete cell objects before the truncation point are still useful
+    soft evidence, so recover only their numeric fields and never infer missing
+    cells as background.
+    """
+    def field(pattern: str) -> str | None:
+        match = re.search(pattern, fragment, flags=re.IGNORECASE | re.DOTALL)
+        return match.group(1) if match else None
+
+    probability = field(
+        r'"(?:pv_probability|probability|confidence)"\s*:\s*'
+        r'([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)'
+    )
+    if probability is None:
+        return None
+    row_text = field(r'"row"\s*:\s*(-?\d+)')
+    col_text = field(r'"col"\s*:\s*(-?\d+)')
+    if row_text is None or col_text is None:
+        row, col = divmod(index, grid_size)
+    else:
+        row, col = int(row_text), int(col_text)
+    # Some responses use human-facing 1..4 coordinates despite the prompt's
+    # zero-based convention.  Convert only when the whole item is out of range.
+    if (row >= grid_size or col >= grid_size) and 1 <= row <= grid_size and 1 <= col <= grid_size:
+        row, col = row - 1, col - 1
+    if not (0 <= row < grid_size and 0 <= col < grid_size):
+        return None
+    status = (field(r'"status"\s*:\s*"([^"]*)"') or "unknown").lower()
+    if status not in {"positive", "negative", "unknown"}:
+        status = "unknown"
+    return {
+        "row": row,
+        "col": col,
+        "pv_probability": _probability(probability),
+        "status": status,
+        "reason": (field(r'"reason"\s*:\s*"([^"]*)"') or "")[:300],
+    }
+
+
+def _recover_grid_from_truncated_text(text: str, grid_size: int = 4) -> list[dict[str, Any]]:
+    """Extract complete grid-cell objects from otherwise invalid JSON text."""
+    recovered: dict[tuple[int, int], dict[str, Any]] = {}
+    for index, match in enumerate(re.finditer(r"\{[^{}]*\}", text, flags=re.DOTALL)):
+        item = _grid_item_from_fragment(match.group(0), index, grid_size)
+        if item is not None:
+            recovered[(item["row"], item["col"])] = item
+    return [recovered[key] for key in sorted(recovered)]
+
+
 def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
     match = re.search(r"\{.*\}", text, flags=re.DOTALL)
     candidate = match.group(0) if match else text
     warning = None
+    recovered_grid: list[dict[str, Any]] = []
     try:
         value = json.loads(candidate)
     except json.JSONDecodeError:
-        warning = "fallback_parser"
+        recovered_grid = _recover_grid_from_truncated_text(text)
+        warning = "truncated_json_recovered_grid" if recovered_grid else "fallback_parser"
         exists_match = re.search(r"(?:pv_exist|存在|光伏).{0,20}(true|false|是|否)", text, re.I)
         confidence_match = re.search(r"(?:confidence|置信度).{0,20}(\d+(?:\.\d+)?)", text, re.I)
         bbox_match = re.search(r"bbox.{0,10}(\[.*?\])", text, re.I | re.DOTALL)
@@ -97,6 +151,8 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
                     else "unknown",
                     "reason": str(item.get("reason", ""))[:300],
                 })
+    if not grid and recovered_grid:
+        grid = recovered_grid
     result = {
         "pv_exist": exists,
         "confidence": confidence,
@@ -108,7 +164,9 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
     }
     if warning:
         result["parse_warning"] = warning
-    if exists and not boxes:
+    # A grid teacher intentionally does not emit a bbox.  This warning is only
+    # valid when neither a bbox nor any usable grid evidence is present.
+    if exists and not boxes and not grid:
         result["parse_warning"] = "pv_exists_without_valid_bbox"
     return result
 

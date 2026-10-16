@@ -26,6 +26,11 @@ def _grid_array(view: dict[str, Any], grid_size: int) -> np.ndarray:
         except (KeyError, TypeError, ValueError):
             continue
         if 0 <= row < grid_size and 0 <= col < grid_size and np.isfinite(probability):
+            # A malformed response occasionally reports a high numeric value
+            # together with status=negative.  Treat that contradiction as no
+            # positive evidence, while leaving unknown cells soft and usable.
+            if str(item.get("status", "unknown")).lower() == "negative":
+                probability = 0.0
             result[row, col] = np.clip(probability, 0.0, 1.0)
     return result
 
@@ -70,7 +75,10 @@ def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tup
     maps = []
     view_meta = record.get("views", {})
     for name, view in view_meta.items():
-        if view.get("status") != "ok" or view.get("parse_warning"):
+        # A recovered/truncated JSON response can still contain complete grid
+        # cells.  Use those cells as weak evidence; only abstain when the view
+        # is not successful or has no usable grid at all.
+        if view.get("status") != "ok" or not isinstance(view.get("grid"), list) or not view.get("grid"):
             continue
         crop = view.get("crop_box")
         maps.append(_view_heatmap(view, size, image_size, crop, bool(view.get("flipped")), grid_size))
@@ -78,19 +86,24 @@ def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tup
         return np.full((size, size), float(settings.get("base_attention", 0.2)), np.float32), {
             "teacher_views_used": 0, "teacher_consistency": 0.0, "teacher_abstained": True}
     stack = np.stack(maps)
-    fused = stack.mean(0)
+    # Local crops are sparse observations.  A mean would dilute one valid
+    # positive crop with several unrelated crops; max pooling preserves the
+    # strongest weak evidence and the consistency diagnostic still records
+    # disagreement across views.
+    fused = stack.max(0)
     if stack.shape[0] > 1:
         consistency = float(np.clip(1.0 - np.mean(np.std(stack, axis=0)), 0.0, 1.0))
     else:
         consistency = 0.0
     if not np.isfinite(fused).any():
         fused[:] = 0.0
-    maximum = max(float(np.nanmax(fused)), 1e-8)
-    normalized = np.nan_to_num(fused / maximum, nan=0.0)
-    normalized = gaussian_filter(normalized, sigma=float(settings.get("gaussian_sigma_patches", 2.0)))
-    normalized /= max(float(normalized.max()), 1e-8)
     base = float(settings.get("base_attention", 0.2))
-    attention = np.clip(base + (1.0 - base) * normalized, base, 1.0).astype(np.float32)
+    # Never renormalize a uniformly low/unknown grid to one.  Diffuse only the
+    # amount above the nonzero base floor, so no positive semantic evidence
+    # leaves the map at the safe base level instead of creating a false gate.
+    signal = np.maximum(np.nan_to_num(fused, nan=0.0) - base, 0.0)
+    signal = gaussian_filter(signal, sigma=float(settings.get("gaussian_sigma_patches", 2.0)))
+    attention = np.clip(base + signal, base, 1.0).astype(np.float32)
     return attention, {"teacher_views_used": len(maps), "teacher_consistency": consistency,
                        "teacher_abstained": False, "attention_max": float(attention.max())}
 

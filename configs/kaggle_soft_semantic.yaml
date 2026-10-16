@@ -31,14 +31,14 @@ teacher:
   quantization: auto
   schema: grid_v2
   max_dynamic_patches: 4
-  max_new_tokens: 192
+  max_new_tokens: 384
   local_views: true
   prompt: |
     这是高分辨率遥感RGB影像。请判断每个网格区域是否存在太阳能光伏板。
     只根据可见视觉证据判断，深色屋顶、水面、阴影和温室可能是干扰。
     只输出一个JSON对象，不要输出Markdown。JSON必须包含：
     pv_exist(boolean)、image_confidence(0到1)、grid(4x4数组)。
-    grid中的每个元素包含row、col、pv_probability(0到1)、status和reason。
+    grid中的每个元素只包含row、col、pv_probability(0到1)和status，不要输出逐格reason，以免截断。
     status只能是positive、negative或unknown。证据不足时必须使用unknown，不能猜测为negative。
     网格坐标相对于当前输入图像，row从上到下，col从左到右。
     还要输出confusion_negatives数组，列出可能混淆的背景物体。

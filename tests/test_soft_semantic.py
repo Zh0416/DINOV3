@@ -37,6 +37,31 @@ class SoftSemanticTests(unittest.TestCase):
         self.assertGreater(float(attention.max()), .2)
         self.assertEqual(diagnostic["teacher_views_used"], 1)
 
+    def test_recovered_grid_warning_is_still_soft_evidence(self):
+        record = {"views": {"original": {
+            "status": "ok", "parse_warning": "truncated_json_recovered_grid",
+            "grid": [{"row": 1, "col": 1, "pv_probability": .9, "status": "positive"}],
+        }}}
+        attention, diagnostic = fuse_soft_attention(record, {
+            "feature_size": 8, "grid_size": 4, "base_attention": .2, "gaussian_sigma_patches": .5
+        })
+        self.assertGreater(float(attention.max()), .2)
+        self.assertEqual(diagnostic["teacher_views_used"], 1)
+
+    def test_unknown_and_negative_grids_do_not_become_positive_after_normalization(self):
+        record = {"views": {
+            "unknown": {"status": "ok", "grid": [
+                {"row": 0, "col": 0, "pv_probability": .1, "status": "unknown"},
+            ]},
+            "negative": {"status": "ok", "grid": [
+                {"row": 1, "col": 1, "pv_probability": .9, "status": "negative"},
+            ]},
+        }}
+        attention, _ = fuse_soft_attention(record, {
+            "feature_size": 8, "grid_size": 4, "base_attention": .2, "gaussian_sigma_patches": .5
+        })
+        self.assertAlmostEqual(float(attention.max()), .2, places=5)
+
     def test_zero_initialized_adapter_is_identity(self):
         model = CachedFeatureSegmenter(16, 16, 8, use_adapter=True, adapter_mode="soft_film")
         features = torch.randn(2, 16, 8, 8)
