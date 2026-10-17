@@ -16,7 +16,7 @@ from pvseg.attention import sanitize_boxes
 from pvseg.utils import model_reference
 
 
-GRID_PARSER_VERSION = 3
+GRID_PARSER_VERSION = 4
 
 _GRID_STATUSES = {"p": "positive", "n": "negative", "u": "unknown",
                   "positive": "positive", "negative": "negative", "unknown": "unknown"}
@@ -24,6 +24,11 @@ _GRID_STATUSES = {"p": "positive", "n": "negative", "u": "unknown",
 
 def _grid_status(value: Any) -> str:
     return _GRID_STATUSES.get(str(value).strip().lower(), "unknown")
+
+
+def _is_compact_grid_cell(value: Any) -> bool:
+    return (isinstance(value, list) and len(value) == 2
+            and not isinstance(value[0], (list, dict)) and isinstance(value[1], str))
 
 
 def _probability(value: Any) -> float:
@@ -102,6 +107,30 @@ def _recover_grid_from_truncated_text(text: str, grid_size: int = 4) -> list[dic
         if not remaining.startswith("["):
             return []
         remaining = remaining[1:].lstrip()
+        try:
+            first, _ = decoder.raw_decode(remaining)
+        except json.JSONDecodeError:
+            first = None
+        if _is_compact_grid_cell(first):
+            # Some teachers flatten the compact 4x4 grid. Recover only a
+            # contiguous prefix, retaining the original row-major positions.
+            while True:
+                try:
+                    pair, end = decoder.raw_decode(remaining)
+                except json.JSONDecodeError:
+                    return recovered
+                if not _is_compact_grid_cell(pair):
+                    return recovered
+                row, col = divmod(len(recovered), grid_size)
+                recovered.append({"row": row, "col": col, "pv_probability": _probability(pair[0]),
+                                  "status": _grid_status(pair[1]), "reason": ""})
+                remaining = remaining[end:].lstrip()
+                if not remaining.startswith(","):
+                    return recovered
+                if len(recovered) == grid_size ** 2:
+                    # A further cell would overflow the declared grid.
+                    return []
+                remaining = remaining[1:].lstrip()
         for row in range(grid_size):
             if not remaining.startswith("["):
                 break
@@ -166,7 +195,15 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
     grid = []
     raw_grid = value.get("grid", [])
     if isinstance(raw_grid, list):
-        # Accept either a flat list of {row,col,...} objects or a nested grid.
+        # Compact cells can arrive as four rows or as sixteen row-major pairs.
+        # Do not silently trim an oversized response into a complete grid.
+        if raw_grid and all(_is_compact_grid_cell(item) for item in raw_grid):
+            if len(raw_grid) > 16:
+                raw_grid = []
+                warning = "invalid_grid_size"
+            else:
+                raw_grid = [raw_grid[start:start + 4] for start in range(0, len(raw_grid), 4)]
+        # Also accept legacy flat {row,col,...} objects and nested object grids.
         if raw_grid and all(isinstance(row, list) for row in raw_grid):
             for row_index, row in enumerate(raw_grid):
                 for col_index, item in enumerate(row):

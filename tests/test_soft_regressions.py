@@ -61,6 +61,51 @@ class SoftRegressionTests(unittest.TestCase):
         self.assertEqual((result["grid"][-1]["row"], result["grid"][-1]["col"]), (1, 0))
         self.assertFalse(result["grid_complete"])
 
+    def test_flat_compact_cloud_negative_response_keeps_all_cells_negative(self):
+        raw = '''{
+          "pv_exist": false,
+          "image_confidence": 0.9,
+          "grid": [
+            [0.95,"n"], [0.95,"n"], [0.95,"n"], [0.95,"n"],
+            [0.95,"n"], [0.95,"n"], [0.95,"n"], [0.95,"n"],
+            [0.95,"n"], [0.95,"n"], [0.95,"n"], [0.95,"n"],
+            [0.95,"n"], [0.95,"n"], [0.95,"n"], [0.95,"n"]
+          ]
+        }'''
+        result = parse_teacher_response(raw)
+        self.assertTrue(result["grid_complete"])
+        self.assertEqual(result["grid_cell_count"], 16)
+        self.assertFalse(result["pv_exist"])
+        self.assertTrue(all(item["status"] == "negative" for item in result["grid"]))
+        self.assertNotIn("parse_warning", result)
+        record = {"views": {"original": {**result, "status": "ok"}}}
+        attention, _ = fuse_soft_attention(record, {"feature_size": 8, "gaussian_sigma_patches": 0.})
+        np.testing.assert_allclose(attention, .2)
+
+    def test_flat_compact_grid_matches_nested_row_major_order(self):
+        pairs = [[index / 16, ("p", "n", "u")[index % 3]] for index in range(16)]
+        flat = parse_teacher_response(json.dumps({"grid": pairs}))
+        nested = parse_teacher_response(json.dumps({"grid": [pairs[i:i+4] for i in range(0, 16, 4)]}))
+        self.assertEqual(flat["grid"], nested["grid"])
+        self.assertTrue(flat["grid_complete"])
+
+    def test_partial_and_oversized_flat_compact_grids_are_not_complete(self):
+        for count, expected_cells in ((15, 15), (17, 0)):
+            with self.subTest(count=count):
+                result = parse_teacher_response(json.dumps({"grid": [[.9, "p"]] * count}))
+                self.assertFalse(result["grid_complete"])
+                self.assertEqual(result["grid_cell_count"], expected_cells)
+
+    def test_flat_compact_truncation_keeps_only_finished_prefix(self):
+        raw = '{"grid":[[0.9,"p"],[0.1,"u"],[0,"n"],[0.8,"p"],[0.7,"p"],[0.6,"'
+        result = parse_teacher_response(raw)
+        self.assertEqual(result["grid_cell_count"], 5)
+        self.assertEqual((result["grid"][-1]["row"], result["grid"][-1]["col"]), (1, 0))
+        self.assertEqual(result["parse_warning"], "truncated_json_recovered_grid")
+        self.assertFalse(result["grid_complete"])
+        malformed = parse_teacher_response('{"grid":[[0.9,"p"],BROKEN,[0.8,"p"]')
+        self.assertEqual(malformed["grid_cell_count"], 1)
+
     def test_explicit_positive_negative_conflict_is_ignored(self):
         record = {"views": {"positive": view(cell()), **{f"negative{i}": view(cell(.95, "negative")) for i in range(5)}}}
         arrays, diagnostic = self.build(record)

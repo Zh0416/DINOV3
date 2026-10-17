@@ -1,4 +1,5 @@
 import copy
+import json
 import logging
 import tempfile
 import unittest
@@ -59,6 +60,23 @@ class GridTeacherResumeTests(unittest.TestCase):
         saved = read_json(self.root / "semantic_prompt.json")["records"][0]["views"]
         self.assertEqual(saved["original"]["generation_prompt"], "old prompt")
         self.assertEqual(saved["hflip"]["generation_prompt"], "new prompt")
+
+    def test_strict_cached_flat_grid_is_reparsed_without_inference(self):
+        self.config["teacher"]["require_complete_grid"] = True
+        self.view["raw_response"] = json.dumps({"pv_exist": False, "grid": [[.95, "n"]] * 16})
+        self.view.update({"grid_cell_count": 0, "grid_complete": False, "grid_parser_version": 3})
+        self.cache()
+        with patch("pvseg.multiview_teacher.InternVLTeacher.load") as load, patch("pvseg.multiview_teacher.torch.cuda.is_available") as cuda:
+            report = generate_grid_teacher(self.config, self.root, logging.getLogger(__name__))
+        load.assert_not_called()
+        cuda.assert_not_called()
+        self.assertEqual(report["new_inferences"], 0)
+        self.assertEqual(report["complete_grid_views"], 2)
+        self.assertEqual(report["grid_cells"], 32)
+        saved = read_json(self.root / "semantic_prompt.json")["records"][0]["views"]["original"]
+        self.assertTrue(saved["grid_complete"])
+        self.assertNotIn("parse_warning", saved)
+        self.assertEqual(saved["crop_box"], self.view["crop_box"])
 
     def test_teacher_model_mismatch_does_not_silently_reuse_or_rerun(self):
         self.cache(model="different-teacher")
