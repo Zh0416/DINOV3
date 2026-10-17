@@ -1,6 +1,6 @@
 seed: 20261016
 protocol:
-  name: fresh120_soft_semantic_v3
+  name: fresh120_soft_semantic_v4
   mode: soft_semantic
   label_usage: final_evaluation_only
 data:
@@ -13,7 +13,7 @@ data:
   image_size: 1024
   max_samples: 120
   train_fraction: 0.7
-  rgb_staging_dir: /kaggle/temp/label_free_rgb_soft_v3
+  rgb_staging_dir: /kaggle/temp/label_free_rgb_soft_v4
   exclude_cache: dinov3-pv-internvl-teacher-cache
   exclude_rgb_hash_file: ../configs/fresh120_pseudo_v1_rgb_hashes.json
 dino:
@@ -31,16 +31,21 @@ teacher:
   quantization: auto
   schema: grid_v2
   max_dynamic_patches: 4
+  use_thumbnail: true
   max_new_tokens: 512
   require_complete_grid: true
   local_views: true
+  max_global_pair_conflict: 0.25
   prompt: |
     这是高分辨率遥感RGB影像。请判断每个网格区域是否存在太阳能光伏板。
     只根据可见视觉证据判断，深色屋顶、水面、阴影和温室可能是干扰。
     只输出一个JSON对象，不要输出Markdown。JSON必须包含：
     pv_exist(boolean)、image_confidence(0到1)、grid(4x4数组)。
-    grid必须恰好4行，每行4格。每格只能是[概率,状态]，例如[0.95,"p"]。
-    概率为0到1；状态只能是"p"(positive)、"n"(negative)、"u"(unknown)。
+    grid必须恰好4行，每行4格。每格只能是[概率,状态]。
+    概率表示该格内存在至少一处光伏板的可能性，不是判断正确的自信程度，也不是光伏面积占比。
+    状态只能是"p"(positive)、"n"(negative)、"u"(unknown)。
+    "p"需有可辨识光伏证据且概率至少0.55；"n"表示明确未见光伏且概率至多0.18。
+    概率与状态必须一致；不要复制相同概率来填满网格。
     证据不足时用"u"，不能猜测为negative。按当前图像从上到下、从左到右排列。
     不要输出row、col、reason或其他字段，必须输出全部16格。
 reliability:
@@ -49,6 +54,8 @@ reliability:
   positive_probability: 0.55
   negative_probability: 0.18
   local_consistency: 0.45
+  min_positive_views: 2
+  min_negative_views: 2
   feature_margin: 0.04
   min_seed_pixels: 4
   boundary_pixels: 1
@@ -77,6 +84,6 @@ ablation:
   seeds: [42, 43, 44]
   variants: [baseline_decoder, semantic_adapter, semantic_capacity, shuffled_semantic]
 runtime:
-  output_dir: /kaggle/working/outputs_soft_v3
+  output_dir: /kaggle/working/outputs_soft_v4
   model_cache_dir: /kaggle/temp/model_cache
   resume: true

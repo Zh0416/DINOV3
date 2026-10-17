@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
 from scipy.ndimage import binary_dilation, binary_erosion, gaussian_filter
 
 from pvseg.label_free_data import load_rgb_manifest
@@ -15,6 +14,7 @@ from pvseg.pseudo_labels import fit_prototypes, normalized_features, rgb_seeds
 from pvseg.utils import atomic_write_json, read_json
 
 IGNORE = 255
+SOFT_PSEUDO_VERSION = 4
 
 
 def _grid_array(view: dict[str, Any], grid_size: int, negative_only: bool = False) -> np.ndarray:
@@ -79,6 +79,10 @@ def _fuse_soft_evidence(record: dict[str, Any], settings: dict[str, Any]):
     size = int(settings["feature_size"])
     image_size = 1024
     grid_size = int(settings.get("grid_size", 4))
+    min_positive = int(settings.get("min_positive_views", 2))
+    min_negative = int(settings.get("min_negative_views", 2))
+    if min_positive < 2 or min_negative < 2:
+        raise ValueError("Soft pseudo-labels require at least two supporting views per class")
     maps, negative_maps = [], []
     view_meta = record.get("views", {})
     for name, view in view_meta.items():
@@ -101,6 +105,9 @@ def _fuse_soft_evidence(record: dict[str, Any], settings: dict[str, Any]):
                 "inconsistent": np.zeros((size, size), bool),
                 "uncertain": np.zeros((size, size), bool),
                 "positive_support": np.zeros((size, size), bool),
+                "negative_support": np.zeros((size, size), bool),
+                "positive_votes": np.zeros((size, size), np.uint16),
+                "negative_votes": np.zeros((size, size), np.uint16),
                 "observations": np.zeros((size, size), np.uint16)}
     stack = np.stack(maps)
     valid = np.isfinite(stack)
@@ -110,11 +117,12 @@ def _fuse_soft_evidence(record: dict[str, Any], settings: dict[str, Any]):
     conflict = (positive_votes > 0) & (negative_votes > 0)
     agreement = positive_votes / np.maximum(observations, 1)
     inconsistent = (positive_votes > 0) & (agreement < float(settings.get("local_consistency", .45)))
-    uncertain = conflict | inconsistent
-    supported = (positive_votes > 0) & ~uncertain
+    under_supported = (positive_votes > 0) & (positive_votes < min_positive)
+    uncertain = conflict | inconsistent | under_supported
+    supported = (positive_votes >= min_positive) & ~uncertain
+    negative_support = (negative_votes >= min_negative) & ~uncertain
     # Only overlapping observations contribute to agreement. Unrelated crops
     # and unknown cells neither dilute a positive nor vote against it.
-    fused = np.where(valid, stack, 0.0).max(0)
     values = np.where(valid, stack, 0.0)
     mean = values.sum(0) / np.maximum(observations, 1)
     variance = (np.where(valid, (stack - mean) ** 2, 0.0).sum(0)
@@ -125,16 +133,20 @@ def _fuse_soft_evidence(record: dict[str, Any], settings: dict[str, Any]):
     # Never renormalize a uniformly low/unknown grid to one.  Diffuse only the
     # amount above the nonzero base floor, so no positive semantic evidence
     # leaves the map at the safe base level instead of creating a false gate.
-    signal = np.where(supported, np.maximum(fused - base, 0.0), 0.0)
+    signal = np.where(supported, np.maximum(mean - base, 0.0), 0.0)
     signal = gaussian_filter(signal, sigma=float(settings.get("gaussian_sigma_patches", 2.0)))
     attention = np.clip(base + signal, base, 1.0).astype(np.float32)
     attention[uncertain] = base  # Do not smooth positive evidence back into a conflict.
     return attention, {"teacher_views_used": len(maps), "teacher_consistency": consistency,
-                       "teacher_abstained": False, "attention_max": float(attention.max()),
+                       "teacher_abstained": not bool(supported.any() or negative_support.any()),
+                       "attention_max": float(attention.max()),
                        "teacher_conflict_pixels": int(conflict.sum()),
                        "teacher_inconsistent_pixels": int(inconsistent.sum())}, {
                            "conflict": conflict, "inconsistent": inconsistent,
                            "uncertain": uncertain, "positive_support": supported,
+                           "negative_support": negative_support,
+                           "positive_votes": positive_votes.astype(np.uint16),
+                           "negative_votes": negative_votes.astype(np.uint16),
                            "observations": observations.astype(np.uint16)}
 
 
@@ -143,13 +155,11 @@ def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tup
     return attention, diagnostic
 
 
-def _resize_feature_mask(mask: np.ndarray, feature_size: int) -> np.ndarray:
-    return np.asarray(Image.fromarray(mask.astype(np.uint8)).resize((feature_size, feature_size), Image.Resampling.NEAREST), bool)
-
-
 def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: np.ndarray,
                               record: dict[str, Any], settings: dict[str, Any]) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     size = int(settings["feature_size"])
+    if feature.shape[1:] != (size, size) or not np.isfinite(feature).all() or not np.isfinite(prototypes).all():
+        raise ValueError("Non-finite or mismatched DINO features/prototypes")
     attention, attention_diag, evidence = _fuse_soft_evidence(record, settings)
     normalized = normalized_features(feature)
     similarity = np.einsum("kc,chw->khw", prototypes, normalized)
@@ -160,10 +170,10 @@ def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: 
     dino_bg = margin <= -feature_margin
     positive_probability = float(settings.get("positive_probability", 0.55))
     negative_probability = float(settings.get("negative_probability", 0.18))
-    semantic_positive = attention >= positive_probability + 0.15
-    raw_candidate = ((attention >= positive_probability) & (fg_seed | dino_fg)) | semantic_positive
+    # A coarse grid says a panel may occur somewhere in the cell, not that
+    # every patch is a panel. Require spatial appearance support for each seed.
+    raw_candidate = (attention >= positive_probability) & fg_seed & dino_fg & ~dino_bg
     raw_candidate &= evidence["positive_support"] & ~evidence["uncertain"]
-    # Strong non-conflicting evidence can seed a region without appearance support.
     strict_positive = raw_candidate
     # Erode only the machine core; the transition ring is unknown rather than background.
     boundary_iterations = int(settings.get("boundary_pixels", 1))
@@ -176,7 +186,7 @@ def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: 
     base = float(settings.get("base_attention", 0.2))
     background_limit = max(base + 0.03, negative_probability)
     explicit_background = (attention <= background_limit) & bg_seed & dino_bg & ~binary_dilation(strict_positive, iterations=1)
-    explicit_background &= ~evidence["uncertain"]
+    explicit_background &= evidence["negative_support"] & ~evidence["uncertain"] & ~dino_fg
     target = np.full((size, size), IGNORE, np.uint8)
     target[explicit_background] = 0
     target[core] = 1
@@ -199,11 +209,14 @@ def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: 
     positive = target == 1
     retained = int(positive.sum()) / max(raw_count, 1)
     weight = np.zeros((size, size), np.float32)
-    weight[target == 0] = 0.5 + 0.5 * (1.0 - attention[target == 0])
-    weight[target == 1] = np.maximum(float(settings.get("positive_weight_floor", 0.35)), attention[target == 1])
+    observations = np.maximum(evidence["observations"], 1)
+    # Agreement weights are engineering proxies, not calibrated PV probabilities.
+    weight[target == 0] = (evidence["negative_votes"] / observations)[target == 0]
+    weight[target == 1] = (evidence["positive_votes"] / observations)[target == 1]
     if fallback:
         weight[positive & ~core] = float(settings.get("positive_weight_floor", 0.35))
     arrays = {
+        "pseudo_version": np.asarray(SOFT_PSEUDO_VERSION, np.int64),
         "target_soft": target,
         "weight_soft": weight,
         "attention_soft": attention,
@@ -213,20 +226,51 @@ def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: 
         "teacher_conflict": evidence["conflict"].astype(np.uint8),
         "teacher_inconsistent": evidence["inconsistent"].astype(np.uint8),
         "teacher_observations": evidence["observations"],
+        "teacher_positive_votes": evidence["positive_votes"],
+        "teacher_negative_votes": evidence["negative_votes"],
     }
     diagnostics = {**attention_diag, "raw_candidate_pixels": raw_count, "positive_pixels": int((target == 1).sum()),
                    "negative_pixels": int((target == 0).sum()), "ignored_pixels": int((target == IGNORE).sum()),
                    "pseudo_retention": retained, "pseudo_retention_before_fallback": retained_before,
                    "retention_fallback": fallback,
+                   "teacher_positive_region_pixels": int(evidence["positive_support"].sum()),
+                   "teacher_negative_region_pixels": int(evidence["negative_support"].sum()),
+                   "appearance_rejected_pixels": int((evidence["positive_support"] & ~raw_candidate).sum()),
                    "pseudo_counts": {str(k): int((target == k).sum()) for k in (0, 1, IGNORE)}}
     return arrays, diagnostics
 
 
 def generate_soft_pseudo_cache(config: dict[str, Any], output_root: Path, logger) -> dict[str, Any]:
+    try:
+        return _generate_soft_pseudo_cache(config, output_root, logger)
+    except Exception as error:
+        path = output_root / "reports" / "pseudo_reliability.json"
+        report = read_json(path) if path.is_file() else {}
+        report.update({"status": "failed", "implementation_version": SOFT_PSEUDO_VERSION,
+                       "manual_labels_used": False, "error": str(error)})
+        atomic_write_json(path, report)
+        raise
+
+
+def _generate_soft_pseudo_cache(config: dict[str, Any], output_root: Path, logger) -> dict[str, Any]:
+    if config.get("teacher", {}).get("cache_only_replay", False):
+        raise RuntimeError("Historical cache-only replay is diagnostic only; it cannot create training targets")
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
     settings = config["reliability"]
     size = int(settings["feature_size"])
-    records = {r["sample_id"]: r for r in read_json(output_root / "semantic_prompt.json")["records"]}
+    report_path = output_root / "reports" / "pseudo_reliability.json"
+    # Invalidate a previous success before touching any cache files.
+    atomic_write_json(report_path, {"status": "building", "implementation_version": SOFT_PSEUDO_VERSION,
+                                    "manual_labels_used": False})
+    payload = read_json(output_root / "semantic_prompt.json")
+    from pvseg.multiview_teacher import validate_grid_cache_provenance, global_pair_diagnostic
+    validate_grid_cache_provenance(payload, config)
+    records = {r["sample_id"]: r for r in payload["records"]}
+    for sample in samples:
+        pair = global_pair_diagnostic(records.get(sample.sample_id, {}).get("views", {}),
+                                      settings.get("positive_probability", .55))
+        if pair["conflict_fraction"] > float(config["teacher"].get("max_global_pair_conflict", .25)):
+            raise RuntimeError(f"Teacher original/hflip conflict for {sample.sample_id}; cannot use this cache for training")
     if config.get("teacher", {}).get("require_complete_grid", False):
         from pvseg.multiview_teacher import validate_complete_grid
         names = ["original", "hflip"] + ([f"local_{i}" for i in range(4)]
@@ -236,26 +280,81 @@ def generate_soft_pseudo_cache(config: dict[str, Any], output_root: Path, logger
                 view = records.get(sample.sample_id, {}).get("views", {}).get(name, {})
                 if not validate_complete_grid(view, int(settings.get("grid_size", 4))):
                     raise RuntimeError(f"Pseudo stage requires complete teacher grids: {sample.sample_id}/{name}")
-    prototypes, counts, train_ids = fit_prototypes(samples, output_root, size, int(settings["min_seed_pixels"]))
+    seed_masks, seed_report = {}, []
+    for sample in samples:
+        if sample.split != "train":
+            continue
+        attention, _, evidence = _fuse_soft_evidence(records.get(sample.sample_id, {}), settings)
+        fg, bg = rgb_seeds(sample.image_path, size)
+        # RGB color alone cannot define PV: exclude water/shadows in unknown
+        # teacher regions from the foreground prototype.
+        fg = fg & evidence["positive_support"] & ~evidence["uncertain"] & (attention >= settings.get("positive_probability", .55))
+        bg = bg & evidence["negative_support"] & ~evidence["uncertain"]
+        seed_masks[sample.sample_id] = (fg, bg)
+        seed_report.append({"sample_id": sample.sample_id, "foreground_pixels": int(fg.sum()),
+                            "background_pixels": int(bg.sum())})
+    atomic_write_json(output_root / "reports" / "prototype_seed_support.json", {
+        "manual_labels_used": False, "per_image": seed_report})
+    prototypes, counts, train_ids = fit_prototypes(samples, output_root, size,
+                                                  int(settings["min_seed_pixels"]), seed_masks)
     np.save(output_root / "rgb_dino_prototypes.npy", prototypes)
     atomic_write_json(output_root / "reports" / "prototype_provenance.json", {
         "train_ids": train_ids, "images_per_class": counts, "manual_labels_used": False,
-        "semantic_prior": "fixed RGB/DINO appearance seeds only; not PV truth"})
+        "semantic_prior": "train-only RGB seeds inside non-conflicting multi-view teacher regions; not PV truth"})
     cache_dir = output_root / "pseudo_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     diagnostics = []
     for sample in samples:
         feature = torch.load(output_root / "feature_cache" / f"{sample.sample_id}.pt", map_location="cpu", weights_only=True).numpy()
         arrays, diagnostic = build_soft_pseudo_targets(feature, sample.image_path, prototypes,
-                                                       records[sample.sample_id], settings)
+                                                       records.get(sample.sample_id, {}), settings)
         np.savez_compressed(cache_dir / f"{sample.sample_id}.npz", **arrays)
         diagnostics.append({"sample_id": sample.sample_id, "split": sample.split, **diagnostic})
-    report = {"manual_labels_used": False, "mode": "soft_semantic", "settings": settings,
+    def outcome(d):
+        if d["positive_pixels"] and d["negative_pixels"]:
+            return "positive_and_background"
+        return "positive_only" if d["positive_pixels"] else "background_only" if d["negative_pixels"] else "abstained"
+    train_counts = {str(label): sum(d["pseudo_counts"][str(label)] for d in diagnostics if d["split"] == "train")
+                    for label in (0, 1)}
+    ready = all(train_counts.values())
+    report = {"status": "ready" if ready else "failed", "implementation_version": SOFT_PSEUDO_VERSION,
+              "manual_labels_used": False, "mode": "soft_semantic", "settings": settings,
+              "train_class_pixels": train_counts,
               "retention_fallback_images": sum(d["retention_fallback"] for d in diagnostics),
-              "rejection_counts": dict(Counter("fallback" if d["retention_fallback"] else "retained" for d in diagnostics)),
+              "rejection_counts": dict(Counter(outcome(d) for d in diagnostics)),
               "per_image": diagnostics}
-    atomic_write_json(output_root / "reports" / "pseudo_reliability.json", report)
+    atomic_write_json(report_path, report)
     logger.info("Soft pseudo-label diagnostics: %s", report["rejection_counts"])
-    if not any(d["positive_pixels"] for d in diagnostics if d["split"] == "train"):
-        raise RuntimeError("No positive soft pseudo-labels in training split; abstain instead of inventing labels")
+    if not ready:
+        raise RuntimeError(f"Soft training requires both positive and background seeds; got {train_counts}. "
+                           "Inspect prototype_seed_support.json and pseudo_reliability.json; abstain instead of inventing labels")
     return report
+
+
+def validate_soft_pseudo_cache(samples, output_root, settings):
+    """Training may be invoked directly; never trust stale/failed pseudo outputs."""
+    report = read_json(output_root / "reports" / "pseudo_reliability.json")
+    if (report.get("status") != "ready" or report.get("implementation_version") != SOFT_PSEUDO_VERSION
+            or report.get("settings") != settings):
+        raise RuntimeError("Soft pseudo cache is stale, incomplete or failed; rerun the pseudo stage in a new output directory")
+    expected = {(s.sample_id, s.split) for s in samples}
+    if {(d["sample_id"], d["split"]) for d in report.get("per_image", [])} != expected:
+        raise RuntimeError("Soft pseudo cache manifest differs from the current RGB split")
+    counts = np.zeros(2, np.int64)
+    size = int(settings["feature_size"])
+    for sample in samples:
+        with np.load(output_root / "pseudo_cache" / f"{sample.sample_id}.npz", allow_pickle=False) as cache:
+            if "pseudo_version" not in cache or int(cache["pseudo_version"]) != SOFT_PSEUDO_VERSION:
+                raise RuntimeError(f"Stale soft pseudo cache: {sample.sample_id}")
+            target, weight, attention = (cache[k] for k in ("target_soft", "weight_soft", "attention_soft"))
+            if (any(a.shape != (size, size) for a in (target, weight, attention))
+                    or not np.isin(target, [0, 1, IGNORE]).all()
+                    or not np.isfinite(weight).all() or not np.isfinite(attention).all()
+                    or np.any(weight < 0) or np.any(weight > 1)
+                    or np.any(attention < 0) or np.any(attention > 1)
+                    or np.any(weight[target == IGNORE] != 0) or np.any(weight[target != IGNORE] <= 0)):
+                raise RuntimeError(f"Invalid soft pseudo arrays: {sample.sample_id}")
+            if sample.split == "train":
+                counts += [(target == label).sum() for label in (0, 1)]
+    if np.any(counts == 0):
+        raise RuntimeError(f"Soft training requires weighted seeds for both classes; got {counts.tolist()}")

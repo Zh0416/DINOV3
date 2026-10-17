@@ -122,22 +122,23 @@ class SoftRegressionTests(unittest.TestCase):
     def test_unrelated_crop_does_not_vote_against_positive(self):
         negatives = [cell(0., "negative", r, c) for r in range(4) for c in range(4)]
         record = {"views": {"original": view(cell(row=3, col=3)),
+                            "second": view(cell(row=3, col=3)),
                             "local": view(*negatives, crop_box=[0, 0, 512, 512])}}
         attention, diagnostic = fuse_soft_attention(record, {"feature_size": 8, "gaussian_sigma_patches": 0.})
         self.assertEqual(diagnostic["teacher_conflict_pixels"], 0)
         self.assertAlmostEqual(float(attention[-1, -1]), .95, places=5)
 
     def test_local_consistency_uses_observed_votes(self):
-        record = {"views": {"strong": view(cell()), "weak1": view(cell(.2)), "weak2": view(cell(.2)),
+        record = {"views": {"strong": view(cell()), "strong2": view(cell()), "weak1": view(cell(.4)), "weak2": view(cell(.4)),
                             "unknown": view(cell(.99, "unknown"))}}
-        strict, diag = self.build(record, local_consistency=.45)
-        permissive, _ = self.build(record, local_consistency=.3)
+        strict, diag = self.build(record, local_consistency=.6)
+        permissive, _ = self.build(record, local_consistency=.45)
         self.assertEqual(diag["teacher_inconsistent_pixels"], 9)
         self.assertFalse((strict["target_soft"] == 1).any())
         self.assertEqual(int((permissive["target_soft"] == 1).sum()), 9)
 
     def test_retention_fallback_survives_boundary_mask(self):
-        arrays, diagnostic = self.build({"views": {"original": view(cell())}})
+        arrays, diagnostic = self.build({"views": {"original": view(cell()), "second": view(cell())}})
         self.assertEqual(diagnostic["raw_candidate_pixels"], 9)
         self.assertAlmostEqual(diagnostic["pseudo_retention_before_fallback"], 1/9)
         self.assertTrue(diagnostic["retention_fallback"])
@@ -149,7 +150,7 @@ class SoftRegressionTests(unittest.TestCase):
         self.assertTrue((arrays["weight_soft"][arrays["target_soft"] == 255] == 0).all())
 
     def test_single_pixel_candidate_is_not_erased(self):
-        arrays, diagnostic = self.build({"views": {"original": view(cell())}}, size=4)
+        arrays, diagnostic = self.build({"views": {"original": view(cell()), "second": view(cell())}}, size=4)
         self.assertTrue(diagnostic["retention_fallback"])
         self.assertEqual(diagnostic["positive_pixels"], 1)
         self.assertEqual(diagnostic["pseudo_retention"], 1.)
@@ -159,10 +160,10 @@ class SoftRegressionTests(unittest.TestCase):
         from scipy.ndimage import binary_dilation
         size = 20
         features = np.zeros((2, size, size), np.float32)
-        features[0] = 1
-        with patch("pvseg.soft_semantic.rgb_seeds", return_value=(np.zeros((size, size), bool), np.ones((size, size), bool))):
+        features[1] = 1
+        with patch("pvseg.soft_semantic.rgb_seeds", return_value=(np.ones((size, size), bool), np.zeros((size, size), bool))):
             arrays, diagnostic = build_soft_pseudo_targets(features, "unused", np.eye(2),
-                {"views": {"original": view(cell())}},
+                {"views": {"original": view(cell()), "second": view(cell())}},
                 {"feature_size": size, "boundary_pixels": 2, "gaussian_sigma_patches": 0.})
         self.assertTrue(diagnostic["retention_fallback"])
         candidate = arrays["teacher_candidate"].astype(bool)

@@ -35,7 +35,7 @@ def normalized_features(feature):
     return feature / np.maximum(np.linalg.norm(feature, axis=0, keepdims=True), 1e-8)
 
 
-def fit_prototypes(samples, root, size, min_pixels):
+def fit_prototypes(samples, root, size, min_pixels, seed_masks=None):
     """Test RGB/features must never contribute to learned prototypes."""
     sums, counts = None, np.zeros(2, np.int64)
     used = []
@@ -44,7 +44,10 @@ def fit_prototypes(samples, root, size, min_pixels):
             continue
         feature = normalized_features(torch.load(root / "feature_cache" / f"{sample.sample_id}.pt",
                                                  map_location="cpu", weights_only=True).numpy())
-        fg, bg = rgb_seeds(sample.image_path, size)
+        if feature.shape[1:] != (size, size) or not np.isfinite(feature).all():
+            raise ValueError(f"Invalid prototype features: {sample.sample_id}")
+        fg, bg = (rgb_seeds(sample.image_path, size) if seed_masks is None
+                  else seed_masks[sample.sample_id])
         if sums is None:
             sums = np.zeros((2, feature.shape[0]), np.float64)
         # Equal weight per usable image avoids a large dark scene dominating.
@@ -57,7 +60,12 @@ def fit_prototypes(samples, root, size, min_pixels):
     if sums is None or np.any(counts == 0):
         raise RuntimeError("No usable RGB seeds for both prototypes; abstain instead of inventing labels")
     prototypes = sums / counts[:, None]
-    prototypes /= np.maximum(np.linalg.norm(prototypes, axis=1, keepdims=True), 1e-8)
+    norms = np.linalg.norm(prototypes, axis=1, keepdims=True)
+    if seed_masks is not None and (np.any(norms < 1e-8) or not np.isfinite(norms).all()):
+        raise RuntimeError("Degenerate teacher-constrained prototypes; no usable appearance separation")
+    prototypes /= np.maximum(norms, 1e-8)
+    if seed_masks is not None and np.allclose(prototypes[0], prototypes[1], atol=1e-5):
+        raise RuntimeError("Foreground/background prototypes are indistinguishable; abstain")
     return prototypes.astype(np.float32), counts.tolist(), used
 
 

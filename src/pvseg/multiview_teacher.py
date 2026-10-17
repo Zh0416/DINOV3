@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import os
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +11,7 @@ import torch
 from pvseg.config import configure_cloud_cache
 from pvseg.label_free_data import load_rgb_manifest
 from pvseg.teacher import InternVLTeacher, parse_teacher_response
-from pvseg.teacher.internvl import GRID_PARSER_VERSION
+from pvseg.teacher.internvl import GRID_PARSER_VERSION, IMAGE_PREPROCESS_VERSION
 from pvseg.utils import atomic_write_json, read_json
 
 
@@ -97,19 +98,77 @@ def validate_complete_grid(view, grid_size=4):
     return complete
 
 
+def grid_generation_spec(config):
+    teacher = config["teacher"]
+    return {"model_id": teacher["model_id"], "prompt": teacher["prompt"],
+            "schema": teacher.get("schema", "grid_v2"), "dtype": teacher.get("dtype", "float16"),
+            "quantization": teacher.get("quantization", "auto"),
+            "max_new_tokens": int(teacher.get("max_new_tokens", 256)),
+            "max_dynamic_patches": int(teacher.get("max_dynamic_patches", 6)),
+            "use_thumbnail": bool(teacher.get("use_thumbnail", False)),
+            "local_model_path": os.getenv(teacher.get("local_path_env", "")) or None,
+            "preprocess_version": IMAGE_PREPROCESS_VERSION, "do_sample": False}
+
+
+def validate_grid_cache_provenance(payload, config):
+    """Enforce the same generation contract even when the teacher stage is skipped."""
+    spec = grid_generation_spec(config)
+    if (payload.get("cache_only_replay") or payload.get("generation_spec") != spec
+            or payload.get("teacher_model") != config["teacher"]["model_id"]):
+        raise ValueError("Cached teacher generation settings differ or lack provenance; use a new output directory. "
+                         "Historical raw responses may only be migrated with cache_only_replay")
+    for record in payload.get("records", []):
+        for view in record.get("views", {}).values():
+            if (view.get("generation_spec") != spec or view.get("generation_prompt") != spec["prompt"]
+                    or view.get("teacher_model") != spec["model_id"]):
+                raise ValueError("Cached view generation settings differ; refusing mixed teacher evidence")
+    runtime_specs = [v["runtime_spec"] for r in payload.get("records", []) for v in r.get("views", {}).values()
+                     if isinstance(v.get("runtime_spec"), dict)]
+    if runtime_specs and any(item != runtime_specs[0] for item in runtime_specs[1:]):
+        raise ValueError("Cached effective teacher precision/model differs between views")
+
+
+def global_pair_diagnostic(views, positive_probability=.55):
+    """Compare explicit decisions only, restoring the hflip to original coordinates."""
+    def decisions(view):
+        result = {}
+        for cell in view.get("grid", []):
+            status = cell.get("status")
+            if status == "positive" and float(cell.get("pv_probability", 0)) < positive_probability:
+                continue
+            if status in {"positive", "negative"}:
+                row, col = int(cell["row"]), int(cell["col"])
+                result[(row, 3-col if view.get("flipped") else col)] = status
+        return result
+    original, flipped = (decisions(views.get(name, {})) for name in ("original", "hflip"))
+    common = original.keys() & flipped.keys()
+    conflicts = [list(key) for key in sorted(common) if original[key] != flipped[key]]
+    return {"observed_pairs": len(common), "conflicting_cells": conflicts,
+            "conflict_fraction": len(conflicts) / 16,
+            "self_consistency_is_correctness": False}
+
+
 def generate_grid_teacher(config, output_root, logger):
     """Generate full-image and overlapping local grid evidence, never hard boxes."""
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
     destination = output_root / "semantic_prompt.json"
+    spec = grid_generation_spec(config)
+    replay_only = bool(config["teacher"].get("cache_only_replay", False))
     existing, payload = {}, {}
     if config["runtime"].get("resume", True) and destination.is_file():
         # A broken cache must not silently trigger another full teacher run.
         payload = read_json(destination)
         if payload.get("teacher_model", config["teacher"]["model_id"]) != config["teacher"]["model_id"]:
             raise ValueError("Cached teacher model differs; use a separate output directory")
+        if not replay_only:
+            validate_grid_cache_provenance(payload, config)
         existing = {row["sample_id"]: row for row in payload.get("records", [])}
     teacher, started = None, time.perf_counter()
     records, reused_views, reparsed_views, new_inferences = {}, 0, 0, 0
+    pair_checks = []
+    max_pair_conflict = float(config["teacher"].get("max_global_pair_conflict", .25))
+    if not 0 <= max_pair_conflict < 1:
+        raise ValueError("max_global_pair_conflict must be in [0, 1)")
     prompt = config["teacher"]["prompt"]
     require_complete = config["teacher"].get("require_complete_grid", False)
     grid_size = int(config["reliability"].get("grid_size", 4))
@@ -122,7 +181,10 @@ def generate_grid_teacher(config, output_root, logger):
 
     def save_records():
         atomic_write_json(destination, {
-            "teacher_model": config["teacher"]["model_id"], "prompt": prompt,
+            "teacher_model": config["teacher"]["model_id"],
+            "prompt": payload.get("prompt") if replay_only else prompt,
+            "generation_spec": payload.get("generation_spec") if replay_only else spec,
+            "cache_only_replay": replay_only,
             "coordinates": "4x4 grid coordinates are relative to each view; crop_box is in original 1024 frame",
             "schema": "grid_v2", "grid_parser_version": GRID_PARSER_VERSION,
             "generation_provenance": "Each view retains its generation_prompt and teacher_model",
@@ -146,6 +208,19 @@ def generate_grid_teacher(config, output_root, logger):
         record = records.get(sample.sample_id, {"sample_id": sample.sample_id, "views": {}})
         records[sample.sample_id] = record
         views = record["views"]
+        def check_global_pair():
+            diagnostic = {"sample_id": sample.sample_id,
+                          **global_pair_diagnostic(views, config["reliability"].get("positive_probability", .55))}
+            failed = diagnostic["conflict_fraction"] > max_pair_conflict
+            diagnostic["status"] = "failed" if failed else "passed"
+            pair_checks.append(diagnostic)
+            atomic_write_json(output_root / "reports" / "teacher_pair_checks.json", {
+                "status": "failed" if failed else "checked_so_far", "max_conflict_fraction": max_pair_conflict,
+                "manual_labels_used": False, "per_image": pair_checks})
+            if failed:
+                save_records()
+                raise RuntimeError(f"Teacher original/hflip conflict on {len(diagnostic['conflicting_cells'])}/16 cells "
+                                   f"for {sample.sample_id}; stop before local inference. See teacher_pair_checks.json")
         for name, crop_box, view in jobs:
             cached = views.get(name, {})
             if cached.get("status") == "ok" and (cached.get("raw_response") or cached.get("grid")):
@@ -155,12 +230,22 @@ def generate_grid_teacher(config, output_root, logger):
                     raise RuntimeError(f"Incomplete cached teacher grid: {sample.sample_id}/{name} "
                                        f"({cached['grid_cell_count']}/16). Use a new output directory to regenerate with the compact prompt.")
                 reused_views += 1
+                if name == "hflip" and not replay_only:
+                    check_global_pair()
                 continue
+            if replay_only:
+                raise RuntimeError(f"Cache-only replay cannot infer missing/failed view: {sample.sample_id}/{name}")
             if teacher is None:
                 if not torch.cuda.is_available():
                     raise RuntimeError("Uncached InternVL inference must run on a cloud GPU")
                 configure_cloud_cache(config)
                 teacher = InternVLTeacher.load(config["teacher"], logger)
+                runtime = teacher.runtime_spec
+                if isinstance(runtime, dict):
+                    previous = [v["runtime_spec"] for r in records.values() for v in r["views"].values()
+                                if isinstance(v.get("runtime_spec"), dict)]
+                    if any(old != runtime for old in previous):
+                        raise RuntimeError("Teacher effective precision/model differs from cached views; use a new output directory")
             new_inferences += 1
             try:
                 result = teacher.infer(sample.image_path, view=view, crop_box=crop_box, prompt=prompt)
@@ -171,13 +256,17 @@ def generate_grid_teacher(config, output_root, logger):
                 logger.exception("Soft teacher failed: image=%s view=%s", sample.sample_id, name)
                 result = _error_view(crop_box, view == "hflip", error)
             result.update({"grid_parser_version": GRID_PARSER_VERSION,
-                           "generation_prompt": prompt, "teacher_model": config["teacher"]["model_id"]})
+                           "generation_prompt": prompt, "teacher_model": config["teacher"]["model_id"],
+                           "generation_spec": spec})
             views[name] = result
+            save_records()  # Preserve each expensive inference, including later failures.
             complete = validate_complete_grid(result, grid_size)
             if require_complete and not complete:
                 save_records()
                 raise RuntimeError(f"Incomplete teacher grid: {sample.sample_id}/{name} "
                                    f"({result['grid_cell_count']}/16). Raw response saved; check the prompt/token budget before continuing.")
+            if name == "hflip":
+                check_global_pair()
         record.update({"grid_size": int(config["reliability"].get("grid_size", 4)), "teacher_schema": "grid_v2"})
         records[sample.sample_id] = record
         save_records()
@@ -201,4 +290,8 @@ def generate_grid_teacher(config, output_root, logger):
         "incomplete_grid_views": sum(not v.get("grid_complete", False) for r in records.values() for v in r["views"].values()),
     }
     atomic_write_json(output_root / "reports" / "multiview_teacher_report.json", report)
+    if not replay_only:
+        atomic_write_json(output_root / "reports" / "teacher_pair_checks.json", {
+            "status": "passed", "max_conflict_fraction": max_pair_conflict,
+            "manual_labels_used": False, "per_image": pair_checks})
     return report

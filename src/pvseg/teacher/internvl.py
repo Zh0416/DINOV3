@@ -17,6 +17,7 @@ from pvseg.utils import model_reference
 
 
 GRID_PARSER_VERSION = 4
+IMAGE_PREPROCESS_VERSION = 2
 
 _GRID_STATUSES = {"p": "positive", "n": "negative", "u": "unknown",
                   "positive": "positive", "negative": "negative", "unknown": "unknown"}
@@ -255,7 +256,8 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
     return result
 
 
-def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int) -> list[Image.Image]:
+def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int,
+                        use_thumbnail: bool = False) -> list[Image.Image]:
     width, height = image.size
     aspect_ratio = width / height
     layouts = {(1, 1)}
@@ -276,7 +278,7 @@ def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int) -
             rows, columns = candidate
             best_difference = difference
     resized = image.resize((image_size * columns, image_size * rows), Image.Resampling.BICUBIC)
-    return [
+    tiles = [
         resized.crop(
             (
                 column * image_size,
@@ -288,10 +290,14 @@ def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int) -
         for row in range(rows)
         for column in range(columns)
     ]
+    if use_thumbnail and len(tiles) > 1:
+        tiles.append(image.resize((image_size, image_size), Image.Resampling.BICUBIC))
+    return tiles
 
 
 def _pixel_values(image_path: Union[str, Path], model: Any, max_patches: int,
-                  view: str = "original", crop_box: Optional[list[int]] = None) -> tuple[torch.Tensor, int]:
+                  view: str = "original", crop_box: Optional[list[int]] = None,
+                  use_thumbnail: bool = False) -> tuple[torch.Tensor, int]:
     from torchvision import transforms
 
     image_size = int(getattr(model.config, "force_image_size", 448) or 448)
@@ -307,7 +313,7 @@ def _pixel_values(image_path: Union[str, Path], model: Any, max_patches: int,
         image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     elif view != "original":
         raise ValueError(f"Unknown teacher view: {view}")
-    tiles = _dynamic_preprocess(image, image_size, max_patches)
+    tiles = _dynamic_preprocess(image, image_size, max_patches, use_thumbnail)
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -328,6 +334,7 @@ class InternVLTeacher:
     model: Any
     tokenizer: Any
     config: dict[str, Any]
+    runtime_spec: Optional[dict[str, Any]] = None
 
     @classmethod
     def load(cls, config: dict[str, Any], logger: logging.Logger) -> "InternVLTeacher":
@@ -384,7 +391,9 @@ class InternVLTeacher:
                 model = AutoModel.from_pretrained(reference, **kwargs).eval()
                 for parameter in model.parameters():
                     parameter.requires_grad_(False)
-                return cls(model=model, tokenizer=tokenizer, config=config)
+                return cls(model=model, tokenizer=tokenizer, config=config,
+                           runtime_spec={"dtype": str(dtype), "quantization": quantization,
+                                         "model_reference": str(reference)})
             except (RuntimeError, ValueError, ImportError, OSError, AttributeError) as error:
                 last_error = error
                 logger.exception("InternVL load failed with quantization=%s", quantization)
@@ -397,7 +406,8 @@ class InternVLTeacher:
     def infer(self, image_path: Union[str, Path], view: str = "original",
               crop_box: Optional[list[int]] = None, prompt: Optional[str] = None) -> dict[str, Any]:
         values, patch_count = _pixel_values(
-            image_path, self.model, int(self.config.get("max_dynamic_patches", 6)), view, crop_box
+            image_path, self.model, int(self.config.get("max_dynamic_patches", 6)), view, crop_box,
+            bool(self.config.get("use_thumbnail", False))
         )
         generation = {
             "max_new_tokens": int(self.config.get("max_new_tokens", 256)),
@@ -414,6 +424,7 @@ class InternVLTeacher:
         )
         result = parse_teacher_response(raw, image_size=1024)
         result["patch_count"] = patch_count
+        result["runtime_spec"] = self.runtime_spec
         if crop_box is not None:
             result["crop_box"] = list(crop_box)
         result["flipped"] = view == "hflip"

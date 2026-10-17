@@ -43,6 +43,10 @@ def seal_predictions(config, root):
     teacher_report = root / "reports/multiview_teacher_report.json"
     if teacher_report.is_file():
         paths.append(teacher_report)
+    for name in ("teacher_pair_checks.json", "prototype_seed_support.json"):
+        diagnostic = root / "reports" / name
+        if diagnostic.is_file():
+            paths.append(diagnostic)
     for name in ("predictions", "checkpoints", "pseudo_cache"):
         paths.extend(p for p in (root / name).rglob("*") if p.is_file())
     repo = Path(__file__).resolve().parents[2]

@@ -14,7 +14,7 @@ from pvseg.final_evaluation import evaluate_sealed
 from pvseg.label_free_data import load_rgb_manifest, manual_label_firewall, prepare_rgb_manifest
 from pvseg.label_free_training import train_label_free
 from pvseg.models import CachedFeatureSegmenter
-from pvseg.multiview_teacher import generate_grid_teacher
+from pvseg.multiview_teacher import generate_grid_teacher, grid_generation_spec
 from pvseg.pseudo_labels import generate_pseudo_cache
 from pvseg.prediction_seal import seal_predictions
 from pvseg.soft_semantic import build_soft_pseudo_targets, fuse_soft_attention
@@ -42,24 +42,26 @@ class SoftSemanticTests(unittest.TestCase):
         record = {"views": {"original": {
             "status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .9, "status": "positive"}]
         }}}
+        record["views"]["repeat"] = record["views"]["original"].copy()
         attention, diagnostic = fuse_soft_attention(record, {
             "feature_size": 8, "grid_size": 4, "base_attention": .2, "gaussian_sigma_patches": .5
         })
         self.assertEqual(attention.shape, (8, 8))
         self.assertGreaterEqual(float(attention.min()), .2)
         self.assertGreater(float(attention.max()), .2)
-        self.assertEqual(diagnostic["teacher_views_used"], 1)
+        self.assertEqual(diagnostic["teacher_views_used"], 2)
 
     def test_recovered_grid_warning_is_still_soft_evidence(self):
         record = {"views": {"original": {
             "status": "ok", "parse_warning": "truncated_json_recovered_grid",
             "grid": [{"row": 1, "col": 1, "pv_probability": .9, "status": "positive"}],
         }}}
+        record["views"]["repeat"] = record["views"]["original"].copy()
         attention, diagnostic = fuse_soft_attention(record, {
             "feature_size": 8, "grid_size": 4, "base_attention": .2, "gaussian_sigma_patches": .5
         })
         self.assertGreater(float(attention.max()), .2)
-        self.assertEqual(diagnostic["teacher_views_used"], 1)
+        self.assertEqual(diagnostic["teacher_views_used"], 2)
 
     def test_unknown_and_negative_grids_do_not_become_positive_after_normalization(self):
         record = {"views": {
@@ -94,9 +96,10 @@ class SoftSemanticTests(unittest.TestCase):
         record = {"views": {
             "original": {"status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .95, "status": "unknown"}]},
             "local": {"status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .8, "status": "positive"}]},
+            "second": {"status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .8, "status": "positive"}]},
         }}
         attention, diagnostic = fuse_soft_attention(record, {"feature_size": 64, "gaussian_sigma_patches": 2.})
-        self.assertEqual(diagnostic["teacher_views_used"], 1)
+        self.assertEqual(diagnostic["teacher_views_used"], 2)
         self.assertGreater(float(attention.max()), .7)
 
     def test_zero_initialized_adapter_is_identity(self):
@@ -143,7 +146,7 @@ class SoftSemanticTests(unittest.TestCase):
                 "teacher": {"model_id": "synthetic", "prompt": "compact grid", "local_views": False,
                             "require_complete_grid": True},
                 "reliability": {"feature_size": 4, "grid_size": 4, "positive_probability": .55,
-                                "negative_probability": .18, "feature_margin": 0., "min_seed_pixels": 1,
+                                "negative_probability": .18, "feature_margin": .04, "min_seed_pixels": 1,
                                 "boundary_pixels": 0, "gaussian_sigma_patches": .5, "base_attention": .2,
                                 "min_pseudo_retention": .5, "positive_weight_floor": .35, "unknown_weight": .15},
                 "training": {"epochs": 1, "batch_size": 2, "num_workers": 0, "decoder_channels": 16,
@@ -161,18 +164,23 @@ class SoftSemanticTests(unittest.TestCase):
                 (output / "feature_cache").mkdir(parents=True)
                 for sample in samples:
                     feature = torch.zeros(8, 4, 4)
-                    feature[0] = 1.
+                    feature[0, :, 2:] = 1.  # Bright machine background.
+                    feature[1, :, :2] = 1.  # Dark blue machine foreground.
                     torch.save(feature, output / "feature_cache" / f"{sample.sample_id}.pt")
                 records = []
                 for sample in samples:
                     views = {}
                     for name in ("original", "hflip"):
-                        grid = [[[.1, "u"] for _ in range(4)] for _ in range(4)]
-                        grid[1][2 if name == "hflip" else 1] = [.95, "p"]
+                        grid = [[[.95, "p"] if col < 2 else [.05, "n"] for col in range(4)] for _ in range(4)]
+                        if name == "hflip":
+                            grid = [row[::-1] for row in grid]
                         raw = json.dumps({"pv_exist": True, "grid": grid})
-                        views[name] = {**parse_teacher_response(raw), "status": "ok", "flipped": name == "hflip"}
+                        views[name] = {**parse_teacher_response(raw), "status": "ok", "flipped": name == "hflip",
+                                       "generation_prompt": config["teacher"]["prompt"],
+                                       "teacher_model": "synthetic", "generation_spec": grid_generation_spec(config)}
                     records.append({"sample_id": sample.sample_id, "views": views})
-                atomic_write_json(output / "semantic_prompt.json", {"teacher_model": "synthetic", "records": records})
+                atomic_write_json(output / "semantic_prompt.json", {"teacher_model": "synthetic", "records": records,
+                                                                         "generation_spec": grid_generation_spec(config)})
                 teacher_report = generate_grid_teacher(config, output, logger)
                 self.assertEqual(teacher_report["new_inferences"], 0)
                 self.assertEqual(teacher_report["complete_grid_views"], 12)

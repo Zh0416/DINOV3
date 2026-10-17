@@ -39,6 +39,7 @@ def replay(config, source, root, limit, logger):
     config["runtime"]["resume"] = True
     # Historical truncations are intentional inputs in recovery-only replay.
     config["teacher"]["require_complete_grid"] = False
+    config["teacher"]["cache_only_replay"] = True
     teacher = generate_grid_teacher(config, root, logger)
     if teacher["new_inferences"]:
         raise RuntimeError("Cache-only replay unexpectedly performed inference")
@@ -74,7 +75,7 @@ def cloud_smoke(config, root, limit, timeout, report):
     script = Path(__file__).with_name("08_label_free_pipeline.py")
     deadline = time.monotonic() + timeout
     report.update({"mode": "cloud_pipeline", "stages_completed": []})
-    for stage in ("prepare", "features", "teacher", "pseudo", "train", "seal"):
+    for stage in ("prepare", "teacher", "features", "pseudo", "train", "seal"):
         subprocess.run([sys.executable, "-u", str(script), "--config", str(config_path), "--stage", stage],
                        check=True, timeout=max(1., deadline - time.monotonic()))
         report["stages_completed"].append(stage)

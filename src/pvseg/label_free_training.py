@@ -90,6 +90,9 @@ def train_label_free(config, output_root, logger, device=None):
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
     training = config["training"]
     soft_mode = config.get("protocol", {}).get("mode") == "soft_semantic"
+    if soft_mode:
+        from pvseg.soft_semantic import validate_soft_pseudo_cache
+        validate_soft_pseudo_cache(samples, output_root, config["reliability"])
     loss_fn = (IgnoreAwareDiceFocalLoss(training["dice_weight"], training["focal_weight"],
                                         training.get("focal_gamma", 2.0), training.get("focal_alpha", .25))
                if soft_mode else PartialPseudoLoss(training["dice_weight"], training["cross_entropy_weight"]))

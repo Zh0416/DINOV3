@@ -8,7 +8,7 @@ Directory categories are not supervision.
 
 Active protocol: [ITERATION_PROTOCOL.md](ITERATION_PROTOCOL.md).
 Previous config: [configs/kaggle_label_free.yaml](configs/kaggle_label_free.yaml).
-Active soft-semantic v3: [configs/modelscope_soft_semantic.yaml](configs/modelscope_soft_semantic.yaml)
+Active soft-semantic v4: [configs/modelscope_soft_semantic_v4.yaml](configs/modelscope_soft_semantic_v4.yaml)
 for ModelScope, [configs/kaggle_soft_semantic.yaml](configs/kaggle_soft_semantic.yaml) for Kaggle.
 ModelScope setup and commands: [MODELSCOPE_RUN.md](MODELSCOPE_RUN.md).
 Completed Kaggle v4 results: [LABEL_FREE_RESULTS.md](LABEL_FREE_RESULTS.md).
@@ -31,13 +31,13 @@ paired A/B controls (plus constant-map capacity and shuffled-semantic controls) 
 ```bash
 pip install -r requirements.txt
 pip install -e . --no-deps --no-build-isolation
-python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic.yaml --stage prepare
-python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic.yaml --stage features
-python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic.yaml --stage teacher
-python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic.yaml --stage pseudo
-python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic.yaml --stage train
-python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic.yaml --stage seal
-python scripts/09_final_evaluation.py --output-root ./runs/fresh120_soft_semantic_v3
+python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic_v4.yaml --stage prepare
+python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic_v4.yaml --stage teacher
+python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic_v4.yaml --stage features
+python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic_v4.yaml --stage pseudo
+python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic_v4.yaml --stage train
+python scripts/08_label_free_pipeline.py --config configs/modelscope_soft_semantic_v4.yaml --stage seal
+python scripts/09_final_evaluation.py --output-root ./runs/fresh120_soft_semantic_v4
 ```
 
 The image-only manifest has no annotation path or category. Pre-evaluation
@@ -52,8 +52,13 @@ Each view emits a compact 4x4 probability/status grid, using `[probability,"p"|"
 per cell. New runs require all 16 locations before proceeding. Explicit positive
 and negative conflicts at the same location become ignored pixels; unknowns and
 areas outside crops abstain. `local_consistency` measures positive votes among
-observed cells. Non-conflicting evidence is smoothed into a map with base 0.2.
-Fixed RGB seeds and train-only DINO cosine margins support machine targets.
+observed cells. Each class needs at least two supporting views. Non-conflicting
+observations are averaged and smoothed into a map with base 0.2. A coarse positive
+grid marks a candidate region, never all its pixels as PV. Positive seeds require
+both RGB support and a DINO cosine margin; background needs explicit repeated
+negative evidence plus background appearance. Prototypes use only training RGB
+seeds inside the corresponding multi-view teacher regions. Missing either class
+or indistinguishable prototypes stops training, including direct training calls.
 Self-reported confidence is logged, not treated
 as correctness probability. Consistent hallucinations remain possible. Final
 audits measure pseudo-label precision/coverage and false acceptance, without
@@ -87,7 +92,7 @@ successful optimizer steps each) and verifies the prediction seal,
 without opening manual masks or reporting accuracy. Use a new output directory:
 
 ```bash
-python scripts/10_smoke_soft_semantic.py --config configs/modelscope_soft_semantic.yaml --output-root ./runs/soft_smoke_v3 --samples 4
+python scripts/10_smoke_soft_semantic.py --config configs/modelscope_soft_semantic_v4.yaml --output-root ./runs/soft_smoke_v4 --samples 4
 ```
 
 For a CPU-only replay of four saved v6 images, add
@@ -96,12 +101,21 @@ attention fusion without loading models or opening images. Results are written
 to `smoke_report.json`; this mode does not test feature extraction or training.
 
 Resuming the grid teacher reparses cached raw responses and preserves their
-generation prompt and view geometry. Fully cached runs do not load InternVL or
+generation prompt and view geometry. Normal resume requires identical prompt,
+generation parameters and preprocessing version in every view. Fully cached runs do not load InternVL or
 require CUDA; only missing/failed views trigger inference. Incomplete cached grids
 stop a normal run with the saved raw response; use a new output for regeneration.
 Recovery-only replay explicitly allows partial historical grids. Unknown grid cells
 abstain regardless of their numeric probability. When changing the frozen
 protocol, prepare a new output directory; do not edit an old frozen config or seal.
+
+Global original/hflip decisions are checked before local inference. More than
+4/16 explicitly conflicting cells stops the run and saves `teacher_pair_checks.json`;
+this is a fixed engineering gate, not calibrated accuracy. A cheaper two-training-image
+check is available in `scripts/11_teacher_preflight.py` (see ModelScope instructions).
+V4 supplies a global thumbnail alongside dynamic image tiles and removes the
+positive-only prompt example. These changes require GPU validation; they do not
+establish that InternVL recognizes PV correctly. See [method review](METHOD_REVIEW_20261017.md).
 
 ## Synthetic verification
 

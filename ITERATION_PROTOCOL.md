@@ -1,6 +1,6 @@
 # Final-evaluation-only pilots
 
-Active: `fresh120_soft_semantic_v3` (see the final section). The bbox protocol
+Active: `fresh120_soft_semantic_v4` (see the final section). The bbox protocol
 below describes the historical `fresh120_pseudo_v1` experiment.
 
 Manual masks cannot enter feature extraction, training, teacher filtering, loss,
@@ -108,10 +108,11 @@ acceptance/rejection after sealing. Save fixed-order GT/prediction visualization
 Weights/features/checkpoints stay on the cloud server. Do not retune and call the same
 holdout untouched.
 
-## Soft-semantic v3 protocol
+## Soft-semantic v4 protocol
 
-The active redesign is `fresh120_soft_semantic_v3` in
-`configs/kaggle_soft_semantic.yaml`, inherited by `configs/modelscope_soft_semantic.yaml`.
+The active redesign is `fresh120_soft_semantic_v4` in
+`configs/kaggle_soft_semantic.yaml`, inherited by `configs/modelscope_soft_semantic_v4.yaml`
+through the existing server-path config `configs/modelscope_soft_semantic.yaml`.
 It explicitly excludes the 120 RGB hashes
 from `fresh120_pseudo_v1` using metadata only, so the new holdout is not the prior
 36-image test. InternVL is queried on the full image, a horizontal flip, and four
@@ -125,8 +126,19 @@ Historical partial JSON remains recoverable in cache-only replay.
 Only observed overlapping cells vote on local consistency. Crop exteriors and
 unknowns do not count as negative. Any explicit positive/negative conflict, or a
 positive vote fraction below `local_consistency`, becomes ignore=255 and receives
-base attention even after smoothing. Without conflict, maximum supported probability
-is diffused above the 0.2 base; no global renormalization amplifies weak evidence.
+base attention even after smoothing. Each class needs at least two supporting
+views. Without conflict, the mean of observed scores is diffused above the 0.2
+base; no global renormalization amplifies weak evidence. These are repeated views
+of one teacher, not statistically independent experts or calibrated probabilities.
+
+Teacher generation checks the aligned global pair before local inference. More
+than 4/16 explicit positive/negative conflicts stops and saves diagnostics. The
+0.25 gate is fixed before annotation access, solely to reject severe instability.
+The prompt distinguishes PV presence probability from confidence and area fraction;
+dynamic tiles include one whole-view thumbnail when multiple tiles are used.
+Resume requires the same generation spec per view. Effective precision is logged
+and cannot change when filling missing views. Historical replay never generates
+new inferences or training targets.
 
 Machine targets are three-way: stable positive core=1, stable machine background=0,
 and uncertain/transition/conflicting pixels=255. The retention circuit measures only
@@ -136,6 +148,15 @@ the outer transition and conflicts ignored. Retention is computed from the final
 target==1 count; `teacher_core` matches those retained positives, while
 `teacher_eroded_core` preserves the pre-fallback core. Ignored pixels have zero
 pseudo-label weight. Human masks remain unavailable until the prediction seal.
+
+A positive grid cell specifies possible object presence, not dense occupancy.
+Positive seeds intersect repeated positive regions, the score threshold, RGB
+foreground and DINO foreground margin. Background intersects repeated explicit
+negative regions, RGB background and DINO background margin. Training prototypes
+use only RGB seeds in the corresponding non-conflicting teacher regions on the
+training split. Both classes and separable prototypes are mandatory. Direct
+training rejects failed, stale, single-class or non-finite pseudo caches. Version
+4 requires new output/staging directories; previous caches are diagnostic only.
 
 Experiment A is a Decoder-only baseline and B is the zero-initialized FiLM Adapter
 with the soft map. They share exactly the same machine targets, optimizer, decoder

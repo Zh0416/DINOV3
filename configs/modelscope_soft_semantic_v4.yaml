@@ -1,0 +1,7 @@
+# Inherit this server's existing data paths and historical RGB exclusions.
+extends: modelscope_soft_semantic.yaml
+data:
+  rgb_staging_dir: ./runs/rgb_soft_v4
+runtime:
+  output_dir: ./runs/fresh120_soft_semantic_v4
+  resume: true
