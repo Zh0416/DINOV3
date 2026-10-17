@@ -1,0 +1,41 @@
+# Independent diagnostic only; does not change the training configuration.
+seed: 42
+runtime:
+  model_cache_dir: ./model_cache
+clip_probe:
+  model_id: openai/clip-vit-base-patch16
+  revision: 57c216476eefef5ab752ec549e440a49ae4ae5f3
+  local_path_env: CLIP_MODEL_PATH
+  device: cuda
+  dtype: float32
+  batch_size: 8
+  window_size: 256
+  stride: 128
+  max_windows_per_view: 36
+  # Fixed cosine margins, NOT probabilities or dataset-tuned thresholds.
+  min_similarity: 0.20
+  min_margin: 0.03
+  max_pair_conflict: 0.25
+  foreground:
+    - an aerial image of solar panels
+    - a satellite image of a photovoltaic panel array
+    - an overhead image of rooftop solar panels
+  backgrounds:
+    water:
+      - an aerial image of water
+      - an aerial image of a pond or reservoir
+    dark_roof:
+      - an aerial image of a dark building roof
+      - an aerial image of a blue metal roof
+    shadow:
+      - an aerial image of building shadows
+      - an aerial image of tree shadows
+    greenhouse:
+      - an aerial image of agricultural greenhouses
+    vegetation:
+      - an aerial image of trees and grass
+      - an aerial image of agricultural fields
+    road:
+      - an aerial image of asphalt roads and parking lots
+    bare_ground:
+      - an aerial image of bare soil and concrete

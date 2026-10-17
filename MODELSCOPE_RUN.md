@@ -1,5 +1,15 @@
 # 魔搭云服务器运行（soft_semantic v3）
 
+## 当前执行入口（云端两图诊断后更新）
+
+用户已完成协议探针，得到`presence_grid_disagreement`，并因缺背景原型种子阻断。
+目前不执行下文全量/训练流程，也不重复InternVL探针。
+下一步只运行 [CLIP滑窗区域诊断](CLIP_WINDOW_PROBE_20261017.md)，
+使用`runs/teacher_protocol_probe_v4_001/rgb_manifest.json`的同两张train RGB。
+新脚本13不覆盖服务器自定义配置，不加载DINO/InternVL，尚无真实CLIP云端结果。
+
+## 原有流程说明（当前教师门禁未通过，暂不继续）
+
 当前方案仍是冻结 DINOv3、冻结 InternVL，只训练 Adapter 和 Decoder。
 v4 修正粗网格到像素监督的转换、训练原型来源和缓存一致性，保留主干模型。
 
