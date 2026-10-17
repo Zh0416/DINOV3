@@ -7,6 +7,8 @@
 下一步只运行 [CLIP滑窗区域诊断](CLIP_WINDOW_PROBE_20261017.md)，
 使用`runs/teacher_protocol_probe_v4_001/rgb_manifest.json`的同两张train RGB。
 新脚本13不覆盖服务器自定义配置，不加载DINO/InternVL，尚无真实CLIP云端结果。
+用户云端访问官方源失败、镜像连接超时；本地已准备同版本的经校验离线包，并通过真实权重的合成RGB CPU接口检查。
+上传、解压、校验及离线环境变量见上述CLIP诊断文档的“云端无法联网时”一节，无需更换环境或重跑InternVL。
 
 ## 原有流程说明（当前教师门禁未通过，暂不继续）
 

@@ -57,10 +57,46 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('ope
 已核对官方文件列表；没有核验到可用魔搭同权重镜像，不提供猜测模型ID。
 若下载失败，先解决权重获取，不将其他权重悄然当同一协议。已有标准目录时无需下载。
 
+### 云端无法联网时：使用经校验的离线包
+
+用户反馈官方源不可达、镜像连接超时；这些错误发生在下载阶段，尚未进入 CLIP 推理。
+无需因此更换模型或重装现有环境。可在能联网的电脑准备同一固定版本的8个模型文件，
+上传离线包；不要打包下载缓存、锁文件或未完成文件。官方固定权重信息为：
+
+```text
+revision: 57c216476eefef5ab752ec549e440a49ae4ae5f3
+pytorch_model.bin bytes: 598641023
+SHA256: ec89c7b09c749a60aae3c9cd910516f24b58214a7df060b48962d14c469cfbf0
+```
+
+上述字节数与 SHA-256 来自官方该版本的 LFS 元数据，不是根据本地文件自行假定。
+本次离线包名为 `clip-vit-base-patch16-offline.tar.gz`，顶层目录为
+`clip-vit-base-patch16-offline`，含原始模型文件、`OFFLINE_MODEL_SOURCE.json` 和 `SHA256SUMS`。
+将包上传到 `/mnt/workspace/models/` 后执行：
+
+```bash
+cd /mnt/workspace/models
+tar -xzf clip-vit-base-patch16-offline.tar.gz
+cd clip-vit-base-patch16-offline
+sha256sum -c SHA256SUMS
+```
+
+仅当全部显示 `OK` 后继续。该目录独立于先前的下载目录，避免混用未完成文件。
+随后在同一终端设置本地路径与离线模式；保留已有 DINO/InternVL 路径：
+
+```bash
+export CLIP_MODEL_PATH=/mnt/workspace/models/clip-vit-base-patch16-offline
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+```
+
+再运行下方两图诊断命令，入口会保留已设置的 `CLIP_MODEL_PATH`。
+下载、校验或合成 RGB 接口通过，都不代表真实光伏语义已验证。
+
 ```bash
 cd /mnt/workspace/DINOV3
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-export CLIP_MODEL_PATH=/mnt/workspace/models/clip-vit-base-patch16
+export CLIP_MODEL_PATH="${CLIP_MODEL_PATH:-/mnt/workspace/models/clip-vit-base-patch16}"
 python -u scripts/13_clip_window_probe.py \
   --config configs/clip_window_probe_v1.yaml \
   --manifest runs/teacher_protocol_probe_v4_001/rgb_manifest.json \
@@ -94,10 +130,17 @@ python -u scripts/13_clip_window_probe.py \
 ProxyCLIP/SegEarth-OV的空间定位仍是后续候选，本次不叠加。
 MM-DINO的冻结DINO与多层空间解码可供后续学生参考，但其像素监督不解决本次无标签教师矛盾。
 
-本地仅用合成RGB/分数、模拟教师、随机初始化微型CLIP验证实现接口。
-未加载真实CLIP权重、未连接云端、未读取真实人工标签，无真实语义质量或精度结论。
+此前本地仅用合成RGB/分数、模拟教师、随机初始化微型CLIP验证实现接口，
+当时未加载真实CLIP权重。始终未连接云端、未读取真实人工标签，无真实语义质量或精度结论。
 
 2026-10-18本地回归：102项全部通过（无跳过），包括翻转边缘/奇数坐标、显式背景与低分unknown、
 重叠冲突、双视图支持、空集IoU、unknown不稀释冲突、单类退化阻断、CLI来源不符拒绝与失败保留。
 随机微型CLIP在PyTorch2.8.0 CPU / Transformers4.57.6上验证了冻结、文本ensemble、批量图像编码接口；
 没有用随机权重证明语义效果。编译、CLI帮助和差异检查通过。
+
+2026-10-18离线准备补充：已在本地下载上述固定版本，权重字节数和SHA-256匹配官方LFS元数据，
+7个配套文件的Git blob ID也匹配官方元数据。生成的离线压缩包为407726879字节（约408MB），
+仅含8个模型文件、来源记录和校验清单；重新读取归档内容验证了各文件哈希，未包含下载缓存。
+本地PyTorch2.8.0+cpu / Transformers4.57.6已实际加载该真实权重，在强制离线模式下，
+对程序生成的512×512 RGB梯度及其翻转分别完成9窗编码，输出分数有限，模型参数保持冻结。
+这只验证权重和项目编码接口可用，不验证真实光伏语义、云端GPU或用户截图中的Transformers5.16.1环境。
