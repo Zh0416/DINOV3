@@ -1,0 +1,14 @@
+# Run from the repository root. Mount/upload data and weights before starting.
+# Inherits the exact algorithm and controls from the cloud protocol.
+extends: kaggle_soft_semantic.yaml
+data:
+  input_root: ./data
+  rgb_staging_dir: ./runs/rgb_soft_v3
+  exclude_cache: null
+  # Historical pilot manifest: only RGB filenames are read, never masks.
+  # Relative exclusion paths are resolved against this YAML's directory.
+  exclude_manifest_file: ../data/history/split_manifest.json
+runtime:
+  output_dir: ./runs/fresh120_soft_semantic_v3
+  model_cache_dir: ./model_cache
+  resume: true

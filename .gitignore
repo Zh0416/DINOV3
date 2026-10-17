@@ -16,6 +16,7 @@ venv/
 *.safetensors
 outputs/
 model_cache/
+runs/
 feature_cache/
 attention_cache/
 semantic_prompt.json

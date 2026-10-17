@@ -1,4 +1,7 @@
-# Final-evaluation-only pilot: fresh120_pseudo_v1
+# Final-evaluation-only pilots
+
+Active: `fresh120_soft_semantic_v3` (see the final section). The bbox protocol
+below describes the historical `fresh120_pseudo_v1` experiment.
 
 Manual masks cannot enter feature extraction, training, teacher filtering, loss,
 threshold tuning, checkpoint selection or pre-final visualization. Category
@@ -102,27 +105,48 @@ image bootstrap contrasts acknowledge spatial dependence and small subgroups.
 Evaluate at native GT resolution; never resize GT into training pseudo targets.
 Audit pseudo precision/coverage, background contamination and teacher false
 acceptance/rejection after sealing. Save fixed-order GT/prediction visualizations.
-Weights/features/checkpoints stay in Kaggle. Do not retune and call the same
+Weights/features/checkpoints stay on the cloud server. Do not retune and call the same
 holdout untouched.
 
-## Soft-semantic v2 protocol
+## Soft-semantic v3 protocol
 
-The active redesign is `fresh120_soft_semantic_v2` in
-`configs/kaggle_soft_semantic.yaml`. It explicitly excludes the 120 RGB hashes
+The active redesign is `fresh120_soft_semantic_v3` in
+`configs/kaggle_soft_semantic.yaml`, inherited by `configs/modelscope_soft_semantic.yaml`.
+It explicitly excludes the 120 RGB hashes
 from `fresh120_pseudo_v1` using metadata only, so the new holdout is not the prior
 36-image test. InternVL is queried on the full image, a horizontal flip, and four
 overlapping local crops. Each view emits a 4x4 grid probability/status record;
-coordinates are fused into a nonzero-base soft map rather than a hard bounding box.
+coordinates are fused into a nonzero-base soft map. The compact format uses
+`[probability,"p"|"n"|"u"]` for each of 16 cells, with a 512-token ceiling and no
+per-cell explanations. Missing cells are never guessed. Generation saves and stops
+at the first incomplete grid; the pseudo stage also checks complete view coverage.
+Historical partial JSON remains recoverable in cache-only replay.
+
+Only observed overlapping cells vote on local consistency. Crop exteriors and
+unknowns do not count as negative. Any explicit positive/negative conflict, or a
+positive vote fraction below `local_consistency`, becomes ignore=255 and receives
+base attention even after smoothing. Without conflict, maximum supported probability
+is diffused above the 0.2 base; no global renormalization amplifies weak evidence.
 
 Machine targets are three-way: stable positive core=1, stable machine background=0,
 and uncertain/transition/conflicting pixels=255. The retention circuit measures only
 machine pseudo-candidate retention before final annotation access. If it falls below
-50%, the pipeline retains a wider candidate with soft weights and does not invent
-background labels. Human masks remain unavailable until the prediction seal.
+50%, the pipeline restores the inner candidate boundary at weight 0.35, keeping
+the outer transition and conflicts ignored. Retention is computed from the final
+target==1 count; `teacher_core` matches those retained positives, while
+`teacher_eroded_core` preserves the pre-fallback core. Ignored pixels have zero
+pseudo-label weight. Human masks remain unavailable until the prediction seal.
 
 Experiment A is a Decoder-only baseline and B is the zero-initialized FiLM Adapter
 with the soft map. They share exactly the same machine targets, optimizer, decoder
-capacity, seeds, fixed epoch count and final checkpoint rule. `semantic_no_adapter`
-and `shuffled_semantic` are preregistered controls. Loss is ignore-aware Dice plus
+capacity, seeds, fixed epoch count and final checkpoint rule. `semantic_capacity`
+uses the same Adapter with a constant base map (0.2), replacing the duplicated
+`semantic_no_adapter` group. `shuffled_semantic` uses split-local shuffled maps.
+Loss is ignore-aware Dice plus
 Focal; soft weights affect valid machine pixels only. The Adapter never multiplies
 DINO features by attention and starts as an exact identity.
+
+Final evaluation validates the appropriate report schema before annotation
+discovery. Soft-mode audits report abstentions and positive pseudo-label coverage;
+historical bbox-mode audits retain their acceptance fields. ModelScope paths are
+configured independently of Kaggle; historical RGB exclusions remain required.

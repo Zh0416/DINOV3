@@ -12,10 +12,30 @@ import yaml
 
 def load_config(path: Union[str, Path]) -> dict[str, Any]:
     config_path = Path(path).expanduser().resolve()
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-    if not isinstance(config, dict):
-        raise ValueError(f"Configuration must be a mapping: {config_path}")
+    def merge(base, override):
+        result = dict(base)
+        for key, value in override.items():
+            result[key] = merge(result[key], value) if isinstance(result.get(key), dict) and isinstance(value, dict) else value
+        return result
+
+    def read(current, stack):
+        if current in stack:
+            raise ValueError(f"Configuration inheritance cycle: {current}")
+        with current.open("r", encoding="utf-8") as handle:
+            local = yaml.safe_load(handle)
+        if not isinstance(local, dict):
+            raise ValueError(f"Configuration must be a mapping: {current}")
+        parent = local.pop("extends", None)
+        base = read((current.parent / parent).resolve(), stack + [current]) if parent else {}
+        # Exclusion metadata belongs to the file declaring it. Runtime paths
+        # remain relative to the working directory, as in standalone configs.
+        for key in ("exclude_rgb_hash_file", "exclude_manifest_file"):
+            value = local.get("data", {}).get(key)
+            if value:
+                local["data"][key] = str((current.parent / Path(value).expanduser()).resolve())
+        return merge(base, local)
+
+    config = read(config_path, [])
     config["_config_path"] = str(config_path)
     return config
 

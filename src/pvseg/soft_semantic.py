@@ -17,7 +17,7 @@ from pvseg.utils import atomic_write_json, read_json
 IGNORE = 255
 
 
-def _grid_array(view: dict[str, Any], grid_size: int) -> np.ndarray:
+def _grid_array(view: dict[str, Any], grid_size: int, negative_only: bool = False) -> np.ndarray:
     result = np.full((grid_size, grid_size), np.nan, np.float32)
     for item in view.get("grid", []) if isinstance(view.get("grid", []), list) else []:
         try:
@@ -31,6 +31,10 @@ def _grid_array(view: dict[str, Any], grid_size: int) -> np.ndarray:
             # Other views can still provide independent evidence at this location.
             if status not in {"positive", "negative"}:
                 continue
+            if negative_only:
+                if status == "negative":
+                    result[row, col] = 1.0
+                continue
             if status == "negative":
                 probability = 0.0
             result[row, col] = np.clip(probability, 0.0, 1.0)
@@ -39,12 +43,13 @@ def _grid_array(view: dict[str, Any], grid_size: int) -> np.ndarray:
 
 def _view_heatmap(view: dict[str, Any], feature_size: int, image_size: int,
                   crop_box: list[int] | None = None, flipped: bool = False,
-                  grid_size: int = 4) -> np.ndarray:
+                  grid_size: int = 4, negative_only: bool = False) -> np.ndarray:
     """Rasterize relative grid probabilities into the original feature frame."""
-    probabilities = _grid_array(view, grid_size)
+    probabilities = _grid_array(view, grid_size, negative_only)
     if flipped:
         probabilities = np.fliplr(probabilities)
-    heatmap = np.zeros((feature_size, feature_size), np.float32)
+    # NaN distinguishes abstention/outside a crop from an observed negative.
+    heatmap = np.full((feature_size, feature_size), np.nan, np.float32)
     if crop_box is None:
         left, top, right, bottom = 0, 0, image_size, image_size
     else:
@@ -63,18 +68,18 @@ def _view_heatmap(view: dict[str, Any], feature_size: int, image_size: int,
             if not np.isfinite(value):
                 continue
             xa = x0 + int(np.floor((x1 - x0) * col / grid_size))
-            xb = x0 + int(np.ceil((x1 - x0) * (col + 1) / grid_size))
+            xb = x0 + int(np.floor((x1 - x0) * (col + 1) / grid_size))
             ya = y0 + int(np.floor((y1 - y0) * row / grid_size))
-            yb = y0 + int(np.ceil((y1 - y0) * (row + 1) / grid_size))
-            heatmap[ya:yb, xa:xb] = np.maximum(heatmap[ya:yb, xa:xb], value)
+            yb = y0 + int(np.floor((y1 - y0) * (row + 1) / grid_size))
+            heatmap[ya:yb, xa:xb] = value
     return heatmap
 
 
-def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+def _fuse_soft_evidence(record: dict[str, Any], settings: dict[str, Any]):
     size = int(settings["feature_size"])
     image_size = 1024
     grid_size = int(settings.get("grid_size", 4))
-    maps = []
+    maps, negative_maps = [], []
     view_meta = record.get("views", {})
     for name, view in view_meta.items():
         # A recovered/truncated JSON response can still contain complete grid
@@ -86,30 +91,56 @@ def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tup
             continue
         crop = view.get("crop_box")
         maps.append(_view_heatmap(view, size, image_size, crop, bool(view.get("flipped")), grid_size))
+        negative_maps.append(_view_heatmap(view, size, image_size, crop, bool(view.get("flipped")),
+                                           grid_size, negative_only=True))
     if not maps:
         return np.full((size, size), float(settings.get("base_attention", 0.2)), np.float32), {
-            "teacher_views_used": 0, "teacher_consistency": 0.0, "teacher_abstained": True}
+            "teacher_views_used": 0, "teacher_consistency": 0.0, "teacher_abstained": True,
+            "teacher_conflict_pixels": 0, "teacher_inconsistent_pixels": 0}, {
+                "conflict": np.zeros((size, size), bool),
+                "inconsistent": np.zeros((size, size), bool),
+                "uncertain": np.zeros((size, size), bool),
+                "positive_support": np.zeros((size, size), bool),
+                "observations": np.zeros((size, size), np.uint16)}
     stack = np.stack(maps)
-    # Local crops are sparse observations.  A mean would dilute one valid
-    # positive crop with several unrelated crops; max pooling preserves the
-    # strongest weak evidence and the consistency diagnostic still records
-    # disagreement across views.
-    fused = stack.max(0)
-    if stack.shape[0] > 1:
-        consistency = float(np.clip(1.0 - np.mean(np.std(stack, axis=0)), 0.0, 1.0))
-    else:
-        consistency = 0.0
-    if not np.isfinite(fused).any():
-        fused[:] = 0.0
+    valid = np.isfinite(stack)
+    observations = valid.sum(0)
+    positive_votes = (valid & (stack >= float(settings.get("positive_probability", .55)))).sum(0)
+    negative_votes = np.isfinite(np.stack(negative_maps)).sum(0)
+    conflict = (positive_votes > 0) & (negative_votes > 0)
+    agreement = positive_votes / np.maximum(observations, 1)
+    inconsistent = (positive_votes > 0) & (agreement < float(settings.get("local_consistency", .45)))
+    uncertain = conflict | inconsistent
+    supported = (positive_votes > 0) & ~uncertain
+    # Only overlapping observations contribute to agreement. Unrelated crops
+    # and unknown cells neither dilute a positive nor vote against it.
+    fused = np.where(valid, stack, 0.0).max(0)
+    values = np.where(valid, stack, 0.0)
+    mean = values.sum(0) / np.maximum(observations, 1)
+    variance = (np.where(valid, (stack - mean) ** 2, 0.0).sum(0)
+                / np.maximum(observations, 1))
+    overlap = observations > 1
+    consistency = float(1.0 - np.sqrt(variance[overlap]).mean()) if overlap.any() else 0.0
     base = float(settings.get("base_attention", 0.2))
     # Never renormalize a uniformly low/unknown grid to one.  Diffuse only the
     # amount above the nonzero base floor, so no positive semantic evidence
     # leaves the map at the safe base level instead of creating a false gate.
-    signal = np.maximum(np.nan_to_num(fused, nan=0.0) - base, 0.0)
+    signal = np.where(supported, np.maximum(fused - base, 0.0), 0.0)
     signal = gaussian_filter(signal, sigma=float(settings.get("gaussian_sigma_patches", 2.0)))
     attention = np.clip(base + signal, base, 1.0).astype(np.float32)
+    attention[uncertain] = base  # Do not smooth positive evidence back into a conflict.
     return attention, {"teacher_views_used": len(maps), "teacher_consistency": consistency,
-                       "teacher_abstained": False, "attention_max": float(attention.max())}
+                       "teacher_abstained": False, "attention_max": float(attention.max()),
+                       "teacher_conflict_pixels": int(conflict.sum()),
+                       "teacher_inconsistent_pixels": int(inconsistent.sum())}, {
+                           "conflict": conflict, "inconsistent": inconsistent,
+                           "uncertain": uncertain, "positive_support": supported,
+                           "observations": observations.astype(np.uint16)}
+
+
+def fuse_soft_attention(record: dict[str, Any], settings: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    attention, diagnostic, _ = _fuse_soft_evidence(record, settings)
+    return attention, diagnostic
 
 
 def _resize_feature_mask(mask: np.ndarray, feature_size: int) -> np.ndarray:
@@ -119,7 +150,7 @@ def _resize_feature_mask(mask: np.ndarray, feature_size: int) -> np.ndarray:
 def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: np.ndarray,
                               record: dict[str, Any], settings: dict[str, Any]) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     size = int(settings["feature_size"])
-    attention, attention_diag = fuse_soft_attention(record, settings)
+    attention, attention_diag, evidence = _fuse_soft_evidence(record, settings)
     normalized = normalized_features(feature)
     similarity = np.einsum("kc,chw->khw", prototypes, normalized)
     margin = similarity[1] - similarity[0]
@@ -131,50 +162,62 @@ def build_soft_pseudo_targets(feature: np.ndarray, image_path: str, prototypes: 
     negative_probability = float(settings.get("negative_probability", 0.18))
     semantic_positive = attention >= positive_probability + 0.15
     raw_candidate = ((attention >= positive_probability) & (fg_seed | dino_fg)) | semantic_positive
-    # A strong, multi-view semantic signal can seed a region even when RGB/DINO
-    # appearance heuristics miss it; it remains weighted and never becomes a hard gate.
+    raw_candidate &= evidence["positive_support"] & ~evidence["uncertain"]
+    # Strong non-conflicting evidence can seed a region without appearance support.
     strict_positive = raw_candidate
     # Erode only the machine core; the transition ring is unknown rather than background.
     boundary_iterations = int(settings.get("boundary_pixels", 1))
     core = (strict_positive.copy() if boundary_iterations <= 0
             else binary_erosion(strict_positive, iterations=boundary_iterations))
-    if strict_positive.any() and not core.any():
-        core = strict_positive.copy()
     boundary = (np.zeros_like(strict_positive) if boundary_iterations <= 0 else
-                binary_dilation(strict_positive, iterations=1) & ~binary_erosion(strict_positive, iterations=1))
+                binary_dilation(strict_positive, iterations=boundary_iterations) & ~core)
     # Attention has a nonzero base level by design, so background is measured
     # relative to that floor rather than compared with an unreachable raw zero.
     base = float(settings.get("base_attention", 0.2))
     background_limit = max(base + 0.03, negative_probability)
     explicit_background = (attention <= background_limit) & bg_seed & dino_bg & ~binary_dilation(strict_positive, iterations=1)
+    explicit_background &= ~evidence["uncertain"]
     target = np.full((size, size), IGNORE, np.uint8)
     target[explicit_background] = 0
     target[core] = 1
     target[boundary] = IGNORE
     raw_count = int(raw_candidate.sum())
-    retained = int(core.sum()) / max(raw_count, 1)
+    retained_before = int((target == 1).sum()) / max(raw_count, 1)
     min_retention = float(settings.get("min_pseudo_retention", 0.5))
-    fallback = bool(raw_count and retained < min_retention)
+    if not 0.0 <= min_retention <= 1.0:
+        raise ValueError("min_pseudo_retention must be between zero and one")
+    fallback = bool(raw_count and retained_before < min_retention)
     if fallback:
         # Keep the broader machine candidate with reduced weights; never invent background.
         target[:] = IGNORE
         target[explicit_background] = 0
         target[strict_positive] = 1
-        target[boundary] = IGNORE
+        # Restore the inner candidate boundary with reduced weights. Only the
+        # outer transition stays unknown; reapplying boundary would undo recovery.
+        target[boundary & ~strict_positive] = IGNORE
+    target[evidence["uncertain"]] = IGNORE
+    positive = target == 1
+    retained = int(positive.sum()) / max(raw_count, 1)
     weight = np.zeros((size, size), np.float32)
     weight[target == 0] = 0.5 + 0.5 * (1.0 - attention[target == 0])
     weight[target == 1] = np.maximum(float(settings.get("positive_weight_floor", 0.35)), attention[target == 1])
-    weight[boundary] = float(settings.get("unknown_weight", 0.15))
+    if fallback:
+        weight[positive & ~core] = float(settings.get("positive_weight_floor", 0.35))
     arrays = {
         "target_soft": target,
         "weight_soft": weight,
         "attention_soft": attention,
         "teacher_candidate": raw_candidate.astype(np.uint8),
-        "teacher_core": core.astype(np.uint8),
+        "teacher_core": positive.astype(np.uint8),
+        "teacher_eroded_core": core.astype(np.uint8),
+        "teacher_conflict": evidence["conflict"].astype(np.uint8),
+        "teacher_inconsistent": evidence["inconsistent"].astype(np.uint8),
+        "teacher_observations": evidence["observations"],
     }
     diagnostics = {**attention_diag, "raw_candidate_pixels": raw_count, "positive_pixels": int((target == 1).sum()),
                    "negative_pixels": int((target == 0).sum()), "ignored_pixels": int((target == IGNORE).sum()),
-                   "pseudo_retention": retained, "retention_fallback": fallback,
+                   "pseudo_retention": retained, "pseudo_retention_before_fallback": retained_before,
+                   "retention_fallback": fallback,
                    "pseudo_counts": {str(k): int((target == k).sum()) for k in (0, 1, IGNORE)}}
     return arrays, diagnostics
 
@@ -183,12 +226,21 @@ def generate_soft_pseudo_cache(config: dict[str, Any], output_root: Path, logger
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
     settings = config["reliability"]
     size = int(settings["feature_size"])
+    records = {r["sample_id"]: r for r in read_json(output_root / "semantic_prompt.json")["records"]}
+    if config.get("teacher", {}).get("require_complete_grid", False):
+        from pvseg.multiview_teacher import validate_complete_grid
+        names = ["original", "hflip"] + ([f"local_{i}" for i in range(4)]
+                                          if config["teacher"].get("local_views", True) else [])
+        for sample in samples:
+            for name in names:
+                view = records.get(sample.sample_id, {}).get("views", {}).get(name, {})
+                if not validate_complete_grid(view, int(settings.get("grid_size", 4))):
+                    raise RuntimeError(f"Pseudo stage requires complete teacher grids: {sample.sample_id}/{name}")
     prototypes, counts, train_ids = fit_prototypes(samples, output_root, size, int(settings["min_seed_pixels"]))
     np.save(output_root / "rgb_dino_prototypes.npy", prototypes)
     atomic_write_json(output_root / "reports" / "prototype_provenance.json", {
         "train_ids": train_ids, "images_per_class": counts, "manual_labels_used": False,
         "semantic_prior": "fixed RGB/DINO appearance seeds only; not PV truth"})
-    records = {r["sample_id"]: r for r in read_json(output_root / "semantic_prompt.json")["records"]}
     cache_dir = output_root / "pseudo_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     diagnostics = []

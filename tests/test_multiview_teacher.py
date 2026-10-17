@@ -66,3 +66,27 @@ class GridTeacherResumeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "teacher model differs"):
                 generate_grid_teacher(self.config, self.root, logging.getLogger(__name__))
         load.assert_not_called()
+
+    def test_incomplete_cached_grid_stops_without_inference(self):
+        self.cache()
+        self.config["teacher"]["require_complete_grid"] = True
+        with patch("pvseg.multiview_teacher.InternVLTeacher.load") as load:
+            with self.assertRaisesRegex(RuntimeError, "Incomplete cached teacher grid"):
+                generate_grid_teacher(self.config, self.root, logging.getLogger(__name__))
+        load.assert_not_called()
+        saved = read_json(self.root / "semantic_prompt.json")["records"][0]["views"]["original"]
+        self.assertEqual(saved["grid_cell_count"], 1)
+        self.assertFalse(saved["grid_complete"])
+
+    def test_incomplete_new_grid_is_saved_and_stops_after_first_inference(self):
+        self.config["teacher"]["require_complete_grid"] = True
+        self.config["runtime"]["model_cache_dir"] = str(self.root / "models")
+        with patch("pvseg.multiview_teacher.InternVLTeacher.load") as load, patch("pvseg.multiview_teacher.torch.cuda.is_available", return_value=True):
+            load.return_value.infer.return_value = {"raw_response": self.view["raw_response"],
+                                                    "grid": [{"row": 0, "col": 0, "status": "positive", "pv_probability": .8}]}
+            with self.assertRaisesRegex(RuntimeError, "Incomplete teacher grid"):
+                generate_grid_teacher(self.config, self.root, logging.getLogger(__name__))
+        self.assertEqual(load.return_value.infer.call_count, 1)
+        saved = read_json(self.root / "semantic_prompt.json")["records"][0]["views"]
+        self.assertEqual(set(saved), {"original"})
+        self.assertIn("raw_response", saved["original"])

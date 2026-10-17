@@ -82,6 +82,21 @@ def reparse_grid_record(record):
     return {**record, "views": views}
 
 
+def validate_complete_grid(view, grid_size=4):
+    """Require every location, including explicit unknowns; never pad missing cells."""
+    expected = {(row, col) for row in range(grid_size) for col in range(grid_size)}
+    cells = view.get("grid", [])
+    if not isinstance(cells, list):
+        cells = []
+    try:
+        locations = {(cell["row"], cell["col"]) for cell in cells}
+    except (KeyError, TypeError):
+        locations = set()
+    complete = view.get("status") == "ok" and len(cells) == len(expected) and locations == expected
+    view.update({"grid_cell_count": len(cells), "grid_complete": complete})
+    return complete
+
+
 def generate_grid_teacher(config, output_root, logger):
     """Generate full-image and overlapping local grid evidence, never hard boxes."""
     samples = load_rgb_manifest(output_root / "rgb_manifest.json")
@@ -96,6 +111,10 @@ def generate_grid_teacher(config, output_root, logger):
     teacher, started = None, time.perf_counter()
     records, reused_views, reparsed_views, new_inferences = {}, 0, 0, 0
     prompt = config["teacher"]["prompt"]
+    require_complete = config["teacher"].get("require_complete_grid", False)
+    grid_size = int(config["reliability"].get("grid_size", 4))
+    if grid_size != 4:
+        raise ValueError("The grid teacher prompt/parser requires grid_size=4")
     local_boxes = _overlapping_quadrants()
     jobs = [("original", None, "original"), ("hflip", None, "hflip")]
     if config["teacher"].get("local_views", True):
@@ -125,10 +144,16 @@ def generate_grid_teacher(config, output_root, logger):
 
     for index, sample in enumerate(samples):
         record = records.get(sample.sample_id, {"sample_id": sample.sample_id, "views": {}})
+        records[sample.sample_id] = record
         views = record["views"]
         for name, crop_box, view in jobs:
             cached = views.get(name, {})
             if cached.get("status") == "ok" and (cached.get("raw_response") or cached.get("grid")):
+                complete = validate_complete_grid(cached, grid_size)
+                if require_complete and not complete:
+                    save_records()
+                    raise RuntimeError(f"Incomplete cached teacher grid: {sample.sample_id}/{name} "
+                                       f"({cached['grid_cell_count']}/16). Use a new output directory to regenerate with the compact prompt.")
                 reused_views += 1
                 continue
             if teacher is None:
@@ -148,6 +173,11 @@ def generate_grid_teacher(config, output_root, logger):
             result.update({"grid_parser_version": GRID_PARSER_VERSION,
                            "generation_prompt": prompt, "teacher_model": config["teacher"]["model_id"]})
             views[name] = result
+            complete = validate_complete_grid(result, grid_size)
+            if require_complete and not complete:
+                save_records()
+                raise RuntimeError(f"Incomplete teacher grid: {sample.sample_id}/{name} "
+                                   f"({result['grid_cell_count']}/16). Raw response saved; check the prompt/token budget before continuing.")
         record.update({"grid_size": int(config["reliability"].get("grid_size", 4)), "teacher_schema": "grid_v2"})
         records[sample.sample_id] = record
         save_records()
@@ -165,6 +195,10 @@ def generate_grid_teacher(config, output_root, logger):
         "manual_labels_used": False,
         "self_confidence_is_calibrated": False,
         "schema": "grid_v2",
+        "require_complete_grid": require_complete,
+        "grid_cells": sum(len(v.get("grid", [])) for r in records.values() for v in r["views"].values()),
+        "complete_grid_views": sum(bool(v.get("grid_complete")) for r in records.values() for v in r["views"].values()),
+        "incomplete_grid_views": sum(not v.get("grid_complete", False) for r in records.values() for v in r["views"].values()),
     }
     atomic_write_json(output_root / "reports" / "multiview_teacher_report.json", report)
     return report

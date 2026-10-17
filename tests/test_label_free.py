@@ -10,7 +10,7 @@ from PIL import Image
 
 from pvseg.final_evaluation import evaluate_sealed
 from pvseg.label_free_data import (RGBSample, PseudoFeatureDataset, manual_label_firewall,
-                                   prepare_rgb_manifest, load_rgb_manifest)
+                                   prepare_rgb_manifest, load_rgb_manifest, rgb_hash)
 from pvseg.label_free_training import train_label_free, VARIANTS, shuffle_donors
 from pvseg.losses import PartialPseudoLoss
 from pvseg.multiview_teacher import restore_hflip_boxes
@@ -107,6 +107,24 @@ class LabelFreeTests(unittest.TestCase):
         changed[:, :, 1:] = 1000*torch.randn_like(changed[:, :, 1:])
         changed_loss, _ = PartialPseudoLoss()(changed, target)
         torch.testing.assert_close(changed_loss, loss.detach())
+
+    def test_prepare_cannot_overwrite_frozen_config(self):
+        prepare_rgb_manifest(self.config, self.output, self.logger)
+        changed = copy.deepcopy(self.config)
+        changed["training"]["epochs"] += 1
+        with self.assertRaisesRegex(RuntimeError, "Config changed"):
+            prepare_rgb_manifest(changed, self.output, self.logger)
+
+    def test_explicit_historical_manifest_excludes_rgb_without_masks(self):
+        source = next((self.root / "pv-gf2").rglob("images/*.bmp"))
+        digest = rgb_hash(source)
+        history = self.root / "history.json"
+        atomic_write_json(history, {"samples": [{"image_path": str(source)}]})
+        self.config["data"].update({"exclude_manifest_file": str(history), "exclude_cache": None})
+        with manual_label_firewall():
+            payload = prepare_rgb_manifest(self.config, self.output, self.logger)
+        self.assertNotIn(digest, {s["sample_id"] for s in payload["samples"]})
+        self.assertEqual(payload["historical_unique_rgb_excluded"], 1)
 
     def test_all_ignored_is_finite_zero(self):
         logits = torch.randn(2, 2, 4, 4, requires_grad=True)

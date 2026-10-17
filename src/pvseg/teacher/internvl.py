@@ -16,7 +16,14 @@ from pvseg.attention import sanitize_boxes
 from pvseg.utils import model_reference
 
 
-GRID_PARSER_VERSION = 2
+GRID_PARSER_VERSION = 3
+
+_GRID_STATUSES = {"p": "positive", "n": "negative", "u": "unknown",
+                  "positive": "positive", "negative": "negative", "unknown": "unknown"}
+
+
+def _grid_status(value: Any) -> str:
+    return _GRID_STATUSES.get(str(value).strip().lower(), "unknown")
 
 
 def _probability(value: Any) -> float:
@@ -55,9 +62,7 @@ def _grid_item_from_fragment(fragment: str, index: int, grid_size: int) -> dict[
         row, col = divmod(index, grid_size)
     else:
         row, col = int(row_text), int(col_text)
-    status = (field(r'"status"\s*:\s*"([^"]*)"') or "unknown").lower()
-    if status not in {"positive", "negative", "unknown"}:
-        status = "unknown"
+    status = _grid_status(field(r'"status"\s*:\s*"([^"]*)"'))
     return {
         "row": row,
         "col": col,
@@ -88,6 +93,36 @@ def _recover_grid_from_truncated_text(text: str, grid_size: int = 4) -> list[dic
         item = _grid_item_from_fragment(match.group(0), len(recovered), grid_size)
         if item is not None:
             recovered.append(item)
+    if not recovered:
+        grid_start = re.search(r'"grid"\s*:', text)
+        # Consume only a contiguous prefix. Searching for arbitrary later pairs
+        # would shift coordinates past a malformed/missing cell.
+        remaining = text[grid_start.end():].lstrip() if grid_start else ""
+        decoder = json.JSONDecoder()
+        if not remaining.startswith("["):
+            return []
+        remaining = remaining[1:].lstrip()
+        for row in range(grid_size):
+            if not remaining.startswith("["):
+                break
+            remaining = remaining[1:].lstrip()
+            for col in range(grid_size):
+                try:
+                    pair, end = decoder.raw_decode(remaining)
+                except json.JSONDecodeError:
+                    return recovered
+                if not isinstance(pair, list) or len(pair) != 2:
+                    return recovered
+                recovered.append({"row": row, "col": col, "pv_probability": _probability(pair[0]),
+                                  "status": _grid_status(pair[1]), "reason": ""})
+                remaining = remaining[end:].lstrip()
+                delimiter = "," if col < grid_size - 1 else "]"
+                if not remaining.startswith(delimiter):
+                    return recovered
+                remaining = remaining[1:].lstrip()
+            if not remaining.startswith(","):
+                break
+            remaining = remaining[1:].lstrip()
     return _normalize_grid_coordinates(recovered, grid_size)
 
 
@@ -135,15 +170,15 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
         if raw_grid and all(isinstance(row, list) for row in raw_grid):
             for row_index, row in enumerate(raw_grid):
                 for col_index, item in enumerate(row):
+                    if isinstance(item, list) and len(item) == 2:
+                        item = {"pv_probability": item[0], "status": item[1]}
                     if isinstance(item, dict):
                         item = {**item, "row": row_index, "col": col_index}
                     if isinstance(item, dict):
                         grid.append({
                             "row": row_index, "col": col_index,
                             "pv_probability": _probability(item.get("pv_probability", item.get("confidence", 0.0))),
-                            "status": str(item.get("status", "unknown")).lower()
-                            if str(item.get("status", "unknown")).lower() in {"positive", "negative", "unknown"}
-                            else "unknown",
+                            "status": _grid_status(item.get("status")),
                             "reason": str(item.get("reason", ""))[:300],
                         })
         else:
@@ -157,9 +192,7 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
                 grid.append({
                     "row": row, "col": col,
                     "pv_probability": _probability(item.get("pv_probability", item.get("confidence", 0.0))),
-                    "status": str(item.get("status", "unknown")).lower()
-                    if str(item.get("status", "unknown")).lower() in {"positive", "negative", "unknown"}
-                    else "unknown",
+                    "status": _grid_status(item.get("status")),
                     "reason": str(item.get("reason", ""))[:300],
                 })
     grid = _normalize_grid_coordinates(grid)
@@ -170,6 +203,8 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
         "confidence": confidence,
         "bbox": boxes,
         "grid": grid,
+        "grid_cell_count": len(grid),
+        "grid_complete": len(grid) == 16,
         "confusion_negatives": value.get("confusion_negatives", []),
         "reason": str(value.get("reason", ""))[:1000],
         "raw_response": raw,

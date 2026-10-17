@@ -17,7 +17,7 @@ from pvseg.utils import atomic_write_json
 
 def cache_dino_features(config: dict[str, Any], output_root: Path, logger) -> dict[str, Any]:
     if not torch.cuda.is_available():
-        raise RuntimeError("DINOv3 feature extraction requires a Kaggle GPU")
+        raise RuntimeError("DINOv3 feature extraction requires a CUDA GPU")
     configure_cloud_cache(config)
     image_size = int(config["data"]["image_size"])
     if config.get("protocol", {}).get("label_usage") == "final_evaluation_only":

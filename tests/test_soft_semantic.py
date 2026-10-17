@@ -1,4 +1,5 @@
 import unittest
+import json
 import logging
 import tempfile
 from pathlib import Path
@@ -9,17 +10,28 @@ import torch
 from PIL import Image
 
 from pvseg.losses import IgnoreAwareDiceFocalLoss
+from pvseg.final_evaluation import evaluate_sealed
 from pvseg.label_free_data import load_rgb_manifest, manual_label_firewall, prepare_rgb_manifest
 from pvseg.label_free_training import train_label_free
 from pvseg.models import CachedFeatureSegmenter
+from pvseg.multiview_teacher import generate_grid_teacher
 from pvseg.pseudo_labels import generate_pseudo_cache
 from pvseg.prediction_seal import seal_predictions
 from pvseg.soft_semantic import build_soft_pseudo_targets, fuse_soft_attention
 from pvseg.teacher import parse_teacher_response
-from pvseg.utils import atomic_write_json
+from pvseg.utils import atomic_write_json, read_json
 
 
 class SoftSemanticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+
+    @classmethod
+    def tearDownClass(cls):
+        torch.set_num_threads(cls.threads)
+
     def test_grid_parser_preserves_unknown(self):
         payload = '{"pv_exist":true,"image_confidence":0.8,"grid":[[{"pv_probability":0.9,"status":"positive"},{"pv_probability":0.1,"status":"unknown"}]]}'
         parsed = parse_teacher_response(payload)
@@ -128,6 +140,8 @@ class SoftSemanticTests(unittest.TestCase):
                          "image_size": 16, "max_samples": 6, "train_fraction": 2/3,
                          "rgb_staging_dir": str(root / "staged")},
                 "dino": {"expected_hidden_dim": 8},
+                "teacher": {"model_id": "synthetic", "prompt": "compact grid", "local_views": False,
+                            "require_complete_grid": True},
                 "reliability": {"feature_size": 4, "grid_size": 4, "positive_probability": .55,
                                 "negative_probability": .18, "feature_margin": 0., "min_seed_pixels": 1,
                                 "boundary_pixels": 0, "gaussian_sigma_patches": .5, "base_attention": .2,
@@ -137,8 +151,8 @@ class SoftSemanticTests(unittest.TestCase):
                              "dice_weight": 1., "focal_weight": 1., "focal_gamma": 2., "focal_alpha": .25,
                              "consistency_weight": 0., "adapter_mode": "soft_film", "threshold": .5,
                              "visualization_samples": 1, "decode_at_image_size": True},
-                "ablation": {"seeds": [42], "variants": ["baseline_decoder", "semantic_adapter"]},
-                "runtime": {"output_dir": str(output), "resume": False},
+                "ablation": {"seeds": [42], "variants": ["baseline_decoder", "semantic_adapter", "semantic_capacity", "shuffled_semantic"]},
+                "runtime": {"output_dir": str(output), "resume": True},
             }
             logger = logging.getLogger("soft_protocol")
             with manual_label_firewall():
@@ -151,15 +165,30 @@ class SoftSemanticTests(unittest.TestCase):
                     torch.save(feature, output / "feature_cache" / f"{sample.sample_id}.pt")
                 records = []
                 for sample in samples:
-                    view = {"status": "ok", "grid": [{"row": 1, "col": 1, "pv_probability": .95, "status": "positive"}]}
-                    records.append({"sample_id": sample.sample_id, "views": {"original": view}})
-                atomic_write_json(output / "semantic_prompt.json", {"records": records})
-                atomic_write_json(output / "reports" / "multiview_teacher_report.json", {"schema": "grid_v2"})
+                    views = {}
+                    for name in ("original", "hflip"):
+                        grid = [[[.1, "u"] for _ in range(4)] for _ in range(4)]
+                        grid[1][2 if name == "hflip" else 1] = [.95, "p"]
+                        raw = json.dumps({"pv_exist": True, "grid": grid})
+                        views[name] = {**parse_teacher_response(raw), "status": "ok", "flipped": name == "hflip"}
+                    records.append({"sample_id": sample.sample_id, "views": views})
+                atomic_write_json(output / "semantic_prompt.json", {"teacher_model": "synthetic", "records": records})
+                teacher_report = generate_grid_teacher(config, output, logger)
+                self.assertEqual(teacher_report["new_inferences"], 0)
+                self.assertEqual(teacher_report["complete_grid_views"], 12)
                 generate_pseudo_cache(config, output, logger)
                 result = train_label_free(config, output, logger, device="cpu")
-                self.assertEqual(len(result["runs"]), 2)
+                self.assertEqual(len(result["runs"]), 4)
+                self.assertTrue(all(sum(e["optimizer_steps"] for e in run["history"]) >= 2 for run in result["runs"]))
                 seal_predictions(config, output)
             self.assertTrue((output / "prediction_seal.json").is_file())
+            final = evaluate_sealed(config, output, logger)
+            self.assertEqual(set(final["summary"]), set(config["ablation"]["variants"]))
+            self.assertEqual(final["test_images"], 2)
+            audit = read_json(output / "reports" / "final_teacher_audit.json")
+            self.assertIn("positive_pseudo_images", audit)
+            self.assertNotIn("accepted_images", audit)
+            self.assertFalse(final["manual_labels_used_for_training_or_selection"])
 
 
 if __name__ == "__main__":

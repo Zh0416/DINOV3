@@ -68,6 +68,9 @@ def load_rgb_manifest(path):
 
 
 def prepare_rgb_manifest(config, output_root, logger):
+    frozen = output_root / "protocol_config.json"
+    if frozen.is_file() and read_json(frozen) != config:
+        raise RuntimeError("Config changed after selection; use a new output directory")
     data = config["data"]
     dataset_root = find_dataset_root(data["input_root"], data["dataset_slug"], data["categories"])
     extensions = set(data["extensions"])
@@ -89,9 +92,11 @@ def prepare_rgb_manifest(config, output_root, logger):
         if payload.get("manual_labels_used", True):
             raise RuntimeError("RGB exclusion manifest must not be derived from manual labels")
     cache_name = data.get("exclude_cache")
-    cache_manifests = [p for p in Path(data["input_root"]).rglob("split_manifest.json")
-                       if cache_name and cache_name in p.as_posix()]
-    if cache_name and len(cache_manifests) != 1:
+    explicit_manifest = data.get("exclude_manifest_file")
+    cache_manifests = ([Path(explicit_manifest)] if explicit_manifest else
+                       [p for p in Path(data["input_root"]).rglob("split_manifest.json")
+                        if cache_name and cache_name in p.as_posix()])
+    if (cache_name or explicit_manifest) and (len(cache_manifests) != 1 or not cache_manifests[0].is_file()):
         raise RuntimeError("Expected exactly one historical manifest to exclude prior pilot RGBs")
     for path in cache_manifests:
         # Extract image filenames only; no annotation or category fields are consumed.
@@ -149,10 +154,11 @@ class RGBDataset(Dataset):
 
 
 class PseudoFeatureDataset(Dataset):
-    def __init__(self, samples, output_root, pseudo_kind, attention_kind, donors=None):
+    def __init__(self, samples, output_root, pseudo_kind, attention_kind, donors=None, base_attention=.2):
         self.samples, self.root = samples, Path(output_root)
         self.pseudo_kind, self.attention_kind = pseudo_kind, attention_kind
         self.donors = donors or {}
+        self.base_attention = float(base_attention)
 
     def __len__(self):
         return len(self.samples)
@@ -167,8 +173,9 @@ class PseudoFeatureDataset(Dataset):
                 pseudo_weight = cache["weight_soft"].copy()
             else:
                 pseudo_weight = np.ones_like(target, dtype=np.float32)
-        if self.attention_kind in ("zero", "ones"):
-            attention = np.full(features.shape[-2:], float(self.attention_kind == "ones"), np.float32)
+        if self.attention_kind in ("zero", "ones", "base"):
+            value = self.base_attention if self.attention_kind == "base" else float(self.attention_kind == "ones")
+            attention = np.full(features.shape[-2:], value, np.float32)
         else:
             donor = self.donors.get(sample.sample_id, sample.sample_id)
             with np.load(self.root / "pseudo_cache" / f"{donor}.npz") as cache:

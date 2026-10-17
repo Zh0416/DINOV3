@@ -37,6 +37,8 @@ def replay(config, source, root, limit, logger):
          "image_path": "not-opened-cache-replay", "split": "replay"} for r in records]})
     config = copy.deepcopy(config)
     config["runtime"]["resume"] = True
+    # Historical truncations are intentional inputs in recovery-only replay.
+    config["teacher"]["require_complete_grid"] = False
     teacher = generate_grid_teacher(config, root, logger)
     if teacher["new_inferences"]:
         raise RuntimeError("Cache-only replay unexpectedly performed inference")
@@ -53,7 +55,7 @@ def replay(config, source, root, limit, logger):
 
 
 def cloud_smoke(config, root, limit, timeout, report):
-    # Keep the normal model sizes, six teacher views and 384-token prompt. Only
+    # Keep the normal model sizes, six teacher views and compact grid prompt. Only
     # image count, training duration and the number of controls are reduced.
     config = copy.deepcopy(config)
     original_path = Path(config.pop("_config_path"))
@@ -64,7 +66,8 @@ def cloud_smoke(config, root, limit, timeout, report):
     config["data"].update({"max_samples": limit, "train_fraction": .5,
                            "rgb_staging_dir": str(root / "rgb")})
     config["runtime"].update({"output_dir": str(root), "resume": True})
-    config["training"].update({"epochs": 1, "num_workers": 0})
+    config["training"].update({"epochs": 2, "num_workers": 0})
+    config["teacher"]["require_complete_grid"] = True
     config["ablation"] = {"seeds": [42], "variants": ["baseline_decoder", "semantic_adapter"]}
     config_path = root / "smoke_config.json"
     atomic_write_json(config_path, config)
@@ -78,6 +81,11 @@ def cloud_smoke(config, root, limit, timeout, report):
         atomic_write_json(root / "smoke_report.json", report)
     seal = verify_seal(root)
     teacher = read_json(root / "reports" / "multiview_teacher_report.json")
+    if teacher["incomplete_grid_views"]:
+        raise RuntimeError("Cloud smoke requires complete 4x4 grids for every view")
+    training = read_json(root / "reports" / "label_free_training.json")
+    if any(sum(epoch["optimizer_steps"] for epoch in run["history"]) < 2 for run in training["runs"]):
+        raise RuntimeError("Smoke requires at least two successful optimizer steps per variant")
     responses = read_json(root / "semantic_prompt.json")["records"]
     report.update({"teacher": teacher, "seal_verified": True, "training_runs": seal["runs"],
                    "grid_views": sum(bool(v.get("grid")) for r in responses for v in r["views"].values()),
