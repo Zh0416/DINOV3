@@ -1,0 +1,6 @@
+# One fixed scale comparison on the SAME train RGB manifest, not a threshold search.
+extends: clip_window_probe_v1.yaml
+clip_probe:
+  window_size: 128
+  stride: 64
+  max_windows_per_view: 64

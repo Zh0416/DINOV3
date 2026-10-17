@@ -129,6 +129,70 @@ def diagnose_pair(original, flipped):
     return report, consensus
 
 
+def diagnose_window_pair(original, flipped):
+    """Compare identical crop locations after reflection, before region broadcasting.
+
+    Different overlapping windows can create pixel-region consensus even when
+    no same-location window repeats a known decision. Report both levels.
+    """
+    size = original.get("rgb_size")
+    if (not isinstance(size, (list, tuple)) or len(size) != 2
+            or any(type(v) is not int or v < 1 for v in size)
+            or flipped.get("rgb_size") != size):
+        raise ValueError("Window pair RGB size mismatch or invalid size")
+    width, height = size
+
+    def index_windows(view, reflect):
+        windows = view.get("windows")
+        if not isinstance(windows, list) or not windows:
+            raise ValueError("Window pair needs nonempty window lists")
+        indexed = {}
+        for window in windows:
+            box = window.get("box_xyxy")
+            if (not isinstance(box, (list, tuple)) or len(box) != 4
+                    or any(type(v) is not int for v in box)):
+                raise ValueError("Invalid window coordinates")
+            x0, y0, x1, y1 = box
+            if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+                raise ValueError("Out-of-bounds window coordinates")
+            label = window.get("state")
+            margin = window.get("foreground_minus_best_background")
+            if type(label) is not int or label not in (UNKNOWN, NEGATIVE, POSITIVE):
+                raise ValueError("Invalid window state")
+            if (isinstance(margin, bool) or not isinstance(margin, (int, float))
+                    or not math.isfinite(margin) or abs(margin) > 2.0002):
+                raise ValueError("Invalid window cosine margin")
+            key = (width - x1, y0, width - x0, y1) if reflect else tuple(box)
+            if key in indexed:
+                raise ValueError("Duplicate window coordinates")
+            indexed[key] = (label, margin)
+        return indexed
+
+    first, second = index_windows(original, False), index_windows(flipped, True)
+    if first.keys() != second.keys():
+        raise ValueError("Window coordinate sets differ after horizontal alignment")
+    keys = sorted(first)
+    states = np.array([[first[k][0], second[k][0]] for k in keys], dtype=np.int8)
+    margins = np.array([[first[k][1], second[k][1]] for k in keys], dtype=np.float64)
+    joint = np.all(states != UNKNOWN, axis=1)
+    agree = states[:, 0] == states[:, 1]
+    change = np.abs(margins[:, 0] - margins[:, 1])
+    return {
+        "matched_windows": len(keys),
+        "transform_three_state_agreement": float(np.mean(agree)),
+        "joint_valid_windows": int(joint.sum()),
+        "joint_valid_fraction": float(np.mean(joint)),
+        "joint_valid_agreement": float(np.mean(agree[joint])) if joint.any() else None,
+        "joint_valid_conflict_fraction": float(np.mean(~agree[joint])) if joint.any() else None,
+        "repeat_positive_windows": int(np.all(states == POSITIVE, axis=1).sum()),
+        "repeat_negative_windows": int(np.all(states == NEGATIVE, axis=1).sum()),
+        "known_unknown_changed_windows": int(np.logical_xor(states[:, 0] == UNKNOWN,
+                                                            states[:, 1] == UNKNOWN).sum()),
+        "mean_absolute_margin_change": float(change.mean()),
+        "max_absolute_margin_change": float(change.max()),
+    }
+
+
 def bounded_decision(rows, max_conflict):
     """Only a gate for further inspection. No automatic pseudo-label or training run."""
     reasons = []

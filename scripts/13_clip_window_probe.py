@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from pvseg.clip_probe import (FrozenCLIPWindowTeacher, bounded_decision, diagnose_pair,
+from pvseg.clip_probe import (FrozenCLIPWindowTeacher, bounded_decision, diagnose_pair, diagnose_window_pair,
                               save_region_preview, validate_settings, window_boxes)
 from pvseg.config import configure_cloud_cache, load_config, seed_everything
 from pvseg.label_free_data import load_rgb_manifest, manual_label_firewall
@@ -95,11 +95,16 @@ def main():
                     row["views"][name], maps[name] = teacher.infer(view)
                     save()
                 row["pair"], consensus = diagnose_pair(maps["original"], maps["hflip"])
+                row["window_pair"] = diagnose_window_pair(row["views"]["original"], row["views"]["hflip"])
                 preview = root / f"{sample.sample_id}_regions.png"
                 save_region_preview(image, maps["original"], maps["hflip"], consensus, preview)
                 row["diagnostic_preview"] = preview.name
                 logger.info("%s consensus region coverage %.3f; conflict %.3f", sample.sample_id[:8],
                             row["pair"]["consensus"]["valid_region_evidence_coverage"], row["pair"]["conflict_fraction"])
+                logger.info("%s same-location windows: %d/%d jointly valid, %d repeat PV, %d repeat background",
+                            sample.sample_id[:8], row["window_pair"]["joint_valid_windows"],
+                            row["window_pair"]["matched_windows"], row["window_pair"]["repeat_positive_windows"],
+                            row["window_pair"]["repeat_negative_windows"])
                 save()
             report["conclusion"] = bounded_decision(report["records"], settings["max_pair_conflict"])
             report["inference_seconds"] = sum(v["elapsed_seconds"] for r in report["records"] for v in r["views"].values())

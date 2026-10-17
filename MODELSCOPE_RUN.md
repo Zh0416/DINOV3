@@ -4,11 +4,16 @@
 
 用户已完成协议探针，得到`presence_grid_disagreement`，并因缺背景原型种子阻断。
 目前不执行下文全量/训练流程，也不重复InternVL探针。
-下一步只运行 [CLIP滑窗区域诊断](CLIP_WINDOW_PROBE_20261017.md)，
+当前实验见 [CLIP滑窗区域诊断](CLIP_WINDOW_PROBE_20261017.md)，
 使用`runs/teacher_protocol_probe_v4_001/rgb_manifest.json`的同两张train RGB。
-新脚本13不覆盖服务器自定义配置，不加载DINO/InternVL，尚无真实CLIP云端结果。
-用户云端访问官方源失败、镜像连接超时；本地已准备同版本的经校验离线包，并通过真实权重的合成RGB CPU接口检查。
-上传、解压、校验及离线环境变量见上述CLIP诊断文档的“云端无法联网时”一节，无需更换环境或重跑InternVL。
+用户已经使用校验过的离线CLIP完成256窗口的两图GPU诊断，报告在
+`runs/clip_window_probe_offline_v1_001/clip_window_probe.json`，不必重复下载或推理。
+第一张有重复正窗，第二张主要unknown；区域共识不是像素伪标签，最终监督覆盖仍未测。
+下一步仅运行上述文档“固定128窗口尺度对照”的命令，配置为
+`configs/clip_window_probe_128_v1.yaml`，产物保存到 `runs/clip_window_probe_128_v1_001`。
+脚本13新增同坐标窗口一致性统计；保留服务器自定义路径，使用
+`CLIP_MODEL_PATH=/mnt/workspace/models/clip-vit-base-patch16-offline` 和离线模式。
+本地没有连接云端；128尺度的真实RGB/GPU效果仍需用户验证。
 
 ## 原有流程说明（当前教师门禁未通过，暂不继续）
 

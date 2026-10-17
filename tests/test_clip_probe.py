@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 
 from pvseg.clip_probe import (FrozenCLIPWindowTeacher, bounded_decision, classify_windows,
-                              diagnose_pair, rasterize_regions, state_summary,
+                              diagnose_pair, diagnose_window_pair, rasterize_regions, state_summary,
                               symmetric_starts, validate_settings, window_boxes)
 from pvseg.config import load_config
 from pvseg.label_free_data import RGBSample, rgb_hash
@@ -70,6 +70,77 @@ class ClipRegionTests(unittest.TestCase):
         report, _ = diagnose_pair(np.ones((2, 2)), np.zeros((2, 2)))
         self.assertEqual(report["conflict_fraction"], 1)
         self.assertEqual(report["consensus"]["valid_region_evidence_coverage"], 0)
+
+    @staticmethod
+    def window_view(size, boxes, labels, margins):
+        return {"rgb_size": list(size), "windows": [
+            {"box_xyxy": list(box), "state": label, "foreground_minus_best_background": margin}
+            for box, label, margin in zip(boxes, labels, margins)]}
+
+    def test_overlapping_regions_do_not_imply_same_location_window_repeatability(self):
+        options = {**settings(), "window_size": 4, "stride": 2}
+        boxes = window_boxes(8, 8, options)
+        labels = [-1] * len(boxes)
+        labels[boxes.index((2, 2, 6, 6))] = 0  # Only the center is known in the original.
+        aligned = [-1] * len(boxes)
+        aligned[boxes.index((0, 0, 4, 4))] = 0  # Only top-left is known in the aligned flip.
+        flipped_boxes = [(8-x1, y0, 8-x0, y1) for x0, y0, x1, y1 in boxes]
+        first = self.window_view((8, 8), boxes, labels, [-.04 if x == 0 else -.02 for x in labels])
+        second = self.window_view((8, 8), flipped_boxes, aligned, [-.04 if x == 0 else -.02 for x in aligned])
+        original_map, _ = rasterize_regions(8, 8, boxes, labels)
+        flipped_map, _ = rasterize_regions(8, 8, flipped_boxes, aligned)
+        region_report, _ = diagnose_pair(original_map, flipped_map)
+        self.assertEqual(region_report["joint_valid_agreement"], 1)
+        self.assertEqual(region_report["consensus"]["negative_region_coverage"], .0625)
+        window_report = diagnose_window_pair(first, second)
+        self.assertEqual(window_report["joint_valid_windows"], 0)
+        self.assertEqual(window_report["repeat_negative_windows"], 0)
+        self.assertEqual(window_report["known_unknown_changed_windows"], 2)
+        self.assertIsNone(window_report["joint_valid_agreement"])
+        self.assertIsNone(window_report["joint_valid_conflict_fraction"])
+        self.assertAlmostEqual(window_report["transform_three_state_agreement"], 7/9)
+
+    def test_window_pair_aligns_reflected_coordinates_independent_of_list_order(self):
+        boxes = window_boxes(7, 5, {**settings(), "window_size": 3, "stride": 2})
+        labels = [-1, 0, 1] * 2
+        margins = [.01, -.07, .08] * 2
+        first = self.window_view((7, 5), boxes, labels, margins)
+        flipped_boxes = [(7-x1, y0, 7-x0, y1) for x0, y0, x1, y1 in boxes]
+        second = self.window_view((7, 5), flipped_boxes, labels, margins)
+        second["windows"].reverse()
+        report = diagnose_window_pair(first, second)
+        self.assertEqual(report["matched_windows"], 6)
+        self.assertEqual(report["joint_valid_windows"], 4)
+        self.assertEqual(report["repeat_positive_windows"], 2)
+        self.assertEqual(report["repeat_negative_windows"], 2)
+        self.assertEqual(report["transform_three_state_agreement"], 1)
+        self.assertEqual(report["max_absolute_margin_change"], 0)
+        second["windows"][0].update(state=0, foreground_minus_best_background=-.08)
+        report = diagnose_window_pair(first, second)
+        self.assertEqual(report["joint_valid_conflict_fraction"], .25)
+        self.assertAlmostEqual(report["max_absolute_margin_change"], .16)
+
+    def test_window_pair_rejects_ambiguous_or_invalid_geometry_and_scores(self):
+        first = self.window_view((8, 4), [(0, 0, 4, 4), (4, 0, 8, 4)], [1, 0], [.1, -.1])
+        for invalid in ("duplicate", "missing", "size", "empty", "nonfinite", "state", "bounds"):
+            with self.subTest(invalid=invalid):
+                second = copy.deepcopy(first)
+                if invalid == "duplicate":
+                    second["windows"].append(copy.deepcopy(second["windows"][0]))
+                elif invalid == "missing":
+                    second["windows"].pop()
+                elif invalid == "size":
+                    second["rgb_size"][0] = 9
+                elif invalid == "empty":
+                    second["windows"] = []
+                elif invalid == "nonfinite":
+                    second["windows"][0]["foreground_minus_best_background"] = float("nan")
+                elif invalid == "state":
+                    second["windows"][0]["state"] = 2
+                else:
+                    second["windows"][0]["box_xyxy"][0] = -1
+                with self.assertRaises(ValueError):
+                    diagnose_window_pair(first, second)
 
     def test_unknown_area_cannot_dilute_conflicts_in_the_followup_gate(self):
         original = np.full((10, 10), -1)
@@ -160,7 +231,11 @@ class ClipProbeIntegrationTests(unittest.TestCase):
                     state = np.where(np.asarray(image)[:, :, 0] > 100, 1, 0).astype(np.int8)
                     if mode["uniform"]:
                         state[:] = 0
-                    return {"status": "ok", "regions": state_summary(state), "windows": [],
+                    boxes = window_boxes(*image.size, options)
+                    labels = [int(state[y0, x0]) for x0, y0, _, _ in boxes]
+                    windows = ClipRegionTests.window_view(image.size, boxes, labels,
+                                                          [.1 if x == 1 else -.1 for x in labels])
+                    return {"status": "ok", "regions": state_summary(state), **windows,
                             "elapsed_seconds": .1}, state
 
             args = ["13_clip_window_probe.py", "--config", str(root / "config.json"),
@@ -172,6 +247,8 @@ class ClipProbeIntegrationTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertIsNone(report["effective_supervision_coverage"])
             self.assertEqual(report["records"][0]["pair"]["positive_region_iou"], 1)
+            self.assertEqual(report["records"][0]["window_pair"]["repeat_positive_windows"], 2)
+            self.assertEqual(report["records"][0]["window_pair"]["repeat_negative_windows"], 2)
             self.assertTrue((root / "probe" / "synthetic_regions.png").is_file())
             self.assertFalse((root / "probe" / "semantic_prompt.json").exists())
             self.assertFalse((root / "probe" / "pseudo_cache").exists())
