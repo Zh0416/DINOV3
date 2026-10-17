@@ -17,6 +17,7 @@ from pvseg.utils import model_reference
 
 
 GRID_PARSER_VERSION = 4
+PRESENCE_PARSER_VERSION = 1
 IMAGE_PREPROCESS_VERSION = 2
 
 _GRID_STATUSES = {"p": "positive", "n": "negative", "u": "unknown",
@@ -256,6 +257,50 @@ def parse_teacher_response(raw: str, image_size: int = 1024) -> dict[str, Any]:
     return result
 
 
+def parse_presence_response(raw: str) -> dict[str, Any]:
+    """Parse a strict whole-image PV-presence probe without inventing a class.
+
+    This probe is diagnostic only.  Its generated probability is retained for
+    protocol checks, but is never treated as a calibrated probability or a
+    source of pixel labels.
+    """
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text,
+                  flags=re.IGNORECASE | re.DOTALL).strip()
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    candidate = match.group(0) if match else text
+    warning = None
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        value = {}
+        warning = "invalid_json"
+    if not isinstance(value, dict):
+        value = {}
+        warning = "not_json_object"
+    raw_status = value.get("status")
+    status = _grid_status(raw_status)
+    raw_probability = value.get("pv_probability")
+    probability_valid = (isinstance(raw_probability, (int, float))
+                         and not isinstance(raw_probability, bool)
+                         and math.isfinite(raw_probability) and 0 <= raw_probability <= 1)
+    probability = float(raw_probability) if probability_valid else 0.0
+    if not probability_valid:
+        warning = warning or "invalid_pv_probability"
+    if str(raw_status).strip().lower() not in _GRID_STATUSES:
+        warning = warning or "invalid_status"
+    result = {
+        "status_label": status,
+        "pv_probability": probability,
+        "parse_valid": warning is None,
+        "raw_response": raw,
+        "presence_parser_version": PRESENCE_PARSER_VERSION,
+    }
+    if warning:
+        result["parse_warning"] = warning
+    return result
+
+
 def _dynamic_preprocess(image: Image.Image, image_size: int, max_patches: int,
                         use_thumbnail: bool = False) -> list[Image.Image]:
     width, height = image.size
@@ -402,25 +447,39 @@ class InternVLTeacher:
                     torch.cuda.empty_cache()
         raise RuntimeError(f"Could not load InternVL teacher: {last_error}")
 
-    @torch.inference_mode()
-    def infer(self, image_path: Union[str, Path], view: str = "original",
-              crop_box: Optional[list[int]] = None, prompt: Optional[str] = None) -> dict[str, Any]:
+    def _chat(self, image_path: Union[str, Path], view: str,
+              crop_box: Optional[list[int]], prompt: str,
+              max_new_tokens: int) -> tuple[str, int]:
         values, patch_count = _pixel_values(
             image_path, self.model, int(self.config.get("max_dynamic_patches", 6)), view, crop_box,
             bool(self.config.get("use_thumbnail", False))
         )
         generation = {
-            "max_new_tokens": int(self.config.get("max_new_tokens", 256)),
+            "max_new_tokens": int(max_new_tokens),
             "do_sample": False,
             "temperature": 0.0,
         }
-        raw = self.model.chat(
-            self.tokenizer,
-            values,
-            prompt or self.config["prompt"],
-            generation,
-            num_patches_list=[patch_count],
-            verbose=False,
+        try:
+            raw = self.model.chat(
+                self.tokenizer,
+                values,
+                prompt,
+                generation,
+                num_patches_list=[patch_count],
+                verbose=False,
+            )
+        finally:
+            del values
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return raw, patch_count
+
+    @torch.inference_mode()
+    def infer(self, image_path: Union[str, Path], view: str = "original",
+              crop_box: Optional[list[int]] = None, prompt: Optional[str] = None) -> dict[str, Any]:
+        raw, patch_count = self._chat(
+            image_path, view, crop_box, prompt or self.config["prompt"],
+            int(self.config.get("max_new_tokens", 256))
         )
         result = parse_teacher_response(raw, image_size=1024)
         result["patch_count"] = patch_count
@@ -428,8 +487,18 @@ class InternVLTeacher:
         if crop_box is not None:
             result["crop_box"] = list(crop_box)
         result["flipped"] = view == "hflip"
-        del values
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        return result
+
+    @torch.inference_mode()
+    def infer_presence(self, image_path: Union[str, Path], view: str = "original",
+                       prompt: Optional[str] = None) -> dict[str, Any]:
+        presence_prompt = prompt or self.config["presence_prompt"]
+        raw, patch_count = self._chat(
+            image_path, view, None, presence_prompt,
+            int(self.config.get("presence_max_new_tokens", 64))
+        )
+        result = parse_presence_response(raw)
+        result.update({"patch_count": patch_count, "runtime_spec": self.runtime_spec,
+                       "flipped": view == "hflip"})
         return result
 

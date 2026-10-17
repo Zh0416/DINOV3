@@ -46,7 +46,40 @@ DINO 可使用 timm SAT493M 的 safetensors 文件（推荐旁边保留原 confi
 配置、权重和模型所需的自定义 Python 文件。现有加载器直接读取这些本地文件；
 未设置环境变量时仍使用配置中的 Hugging Face 模型 ID，不会自动切换下载源。
 
-先用已有小测试的训练 RGB 检查教师（最多两张图、四次 global 推理）：
+先用已有小测试的训练 RGB 做协议归因（默认两张图，每张 presence 与 grid 各做原图/翻转，
+共八次推理）：
+
+```bash
+python scripts/12_teacher_protocol_probe.py \
+  --config configs/modelscope_soft_semantic_v4.yaml \
+  --manifest runs/soft_smoke_002/rgb_manifest.json \
+  --output-root runs/teacher_protocol_probe_v4_001 --samples 2 \
+  --feature-root runs/soft_smoke_002
+```
+
+该命令只读取 manifest 中固定的训练 RGB，不读取目录类别或 masks，不提取新 DINO、不训练。
+`--feature-root` 可选：有来源明确的旧 DINO 缓存时复用它完成只读伪监督覆盖干运行；
+不提供时只诊断教师，不测最终伪监督覆盖。缓存 DINO 配置、输入尺寸、RGB 哈希或训练划分不符会拒绝，
+不会自动重提特征。旧缓存未封存权重字节，报告也不会将配置匹配表述为权重字节已核验。
+查看 `teacher_protocol_probe.json`：`presence_seconds`、`grid_seconds` 是两种协议耗时；
+每张图的 `transform_status_agreement`、`all_positive_views`、`all_negative_views`、
+`pipeline_effective_support_coverage` 和 `protocol_valid_support_coverage` 分别描述翻转一致性、
+全满/全空异常、当前融合能使用的教师覆盖和同时满足提示数值语义的覆盖。这些都是无标签诊断，
+不是准确率。全空/全满是诊断旗标，不证明语义错误；双 unknown、不完整响应和两种协议互相矛盾不能算通过。
+若结论为 `global_teacher_or_transform_sensitivity` 或 `global_presence_abstained`，
+停止 InternVL 网格路线；若为 `grid_elicitation_instability`，先替换或重设计空间教师；
+不要把 presence 判断扩展成像素标签。输出目录必须新建或为空。
+
+提供旧特征时，`pseudo_coverage_dry_run.per_image` 进一步记录教师区域、RGB 交集、平滑后种子、
+DINO margin 后正候选和最终正/负/ignore 数量。`effective_supervision_coverage` 是三值目标中非 ignore
+区域比例；因协议冲突或缺双类种子未能拟合原型时为 null（未测），同时报告阻断层。
+这一干运行只基于选定的两张训练 RGB、两个全局视图，不等于六视图全流程，不生成可训练缓存。
+`conclusion` 或覆盖干运行被阻断时停止，不接着跑 smoke 或降低阈值。
+报告 `status=diagnostic_complete` 仅表示诊断跑完；`eligible_for_bounded_followup=false` 时退出码为 2，
+避免被 shell 当成预检通过。即使为 true，也只允许继续小范围检查，不证明语义准确或允许全量训练。
+
+若只需更短的失败门禁，可用原有预检替代上述探针（最多两张图、四次 global grid 推理），
+不必将两者连续执行：
 
 ```bash
 python scripts/11_teacher_preflight.py \
@@ -63,7 +96,7 @@ python scripts/11_teacher_preflight.py \
 原图/翻转明确冲突超过 4/16 格时立即停止，四个 local 视图不会继续消耗时间。
 通过只说明格式和变换一致性合格，不代表语义正确，更不保证已有双类训练种子。
 
-然后运行 4 图完整测试：
+仅在预检没有阻断、且拟继续检查局部视图和训练闭环时，运行 4 图完整测试：
 
 ```bash
 python scripts/10_smoke_soft_semantic.py \
@@ -101,8 +134,9 @@ python scripts/09_final_evaluation.py --output-root ./runs/fresh120_soft_semanti
 
 该进程先校验文件哈希和报告结构，再读取人工标签。小测试不自动执行这一步。
 
-本次本地验证（2026-10-17）：78 项单元/回归测试通过，包含 6 张合成图像上
+本次本地验证（2026-10-17）：94 项单元/回归测试通过，包含 6 张合成图像上
 四组训练、完整教师缓存校验、预测封存和最终评估，及 AMP 溢出跳步检查。
+新增协议探针、动态切块翻转、非法概率、旧特征来源、无正种子停止和只读覆盖 CLI 集成均用合成输入验证。
 此前回放了 4 张历史云端图像的 24 个响应，恢复 284 个完整单元；
 24 个历史视图均不足 16 格，因此只能作为恢复测试，不能据此确认新版真实推理完整。
 本次未在魔搭上加载真实权重或运行 GPU，未读取真实人工标签，没有新的准确率指标。
